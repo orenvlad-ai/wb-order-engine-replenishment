@@ -1,12 +1,14 @@
 from io import BytesIO
-from typing import Iterable
+from typing import Iterable, Optional
 
 import pandas as pd
 
 _SALES_SHEET = "Продажи и остатки по складам"
 _SUPPLY_SHEET = "Поставки в пути"
+_FULFILLMENT_SHEET = "Остатки Фулфилмент"
 _MIN_STOCK_SHEET = "MinStock"
 _THRESHOLD_SHEET = "Порог загрузки транспорта"
+_ACCEPTANCE_SHEET = "Окна приёмки"
 
 _SALES_STOCK_COLUMNS = [
     "Артикул продавца",
@@ -16,29 +18,54 @@ _SALES_STOCK_COLUMNS = [
     "Остаток на сегодня",
 ]
 _SUPPLY_COLUMNS = ["Артикул продавца", "Артикул WB", "Склад", "Количество"]
+_FULFILLMENT_COLUMNS = ["Артикул продавца", "Артикул WB", "Количество"]
 _MIN_STOCK_COLUMNS = ["Артикул продавца", "Артикул WB", "Значение"]
 _THRESHOLD_COLUMNS = ["Порог загрузки, шт"]
+_ACCEPTANCE_COLUMNS = ["Название склада", "Количество дней"]
 
 
-def _ensure_columns(dataframe: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
+def _ensure_columns(
+    dataframe: Optional[pd.DataFrame], columns: Iterable[str]
+) -> pd.DataFrame:
+    if dataframe is None:
+        return pd.DataFrame(columns=columns)
+
     df = dataframe.copy()
     for column in columns:
         if column not in df.columns:
             df[column] = pd.Series(dtype="object")
-    return df[list(columns)] if df.size else df.reindex(columns=columns)
+    return df.loc[:, list(columns)] if df.size else df.reindex(columns=columns)
 
 
-def build_prototype_workbook(sales_stock_df: pd.DataFrame) -> BytesIO:
-    sales_stock = _ensure_columns(sales_stock_df, _SALES_STOCK_COLUMNS)
-    supplies = pd.DataFrame(columns=_SUPPLY_COLUMNS)
-    min_stock = pd.DataFrame(columns=_MIN_STOCK_COLUMNS)
-    threshold = pd.DataFrame(columns=_THRESHOLD_COLUMNS)
+def build_prototype_workbook(
+    sales_stock_df: Optional[pd.DataFrame] = None,
+    supplies_df: Optional[pd.DataFrame] = None,
+    fulfillment_df: Optional[pd.DataFrame] = None,
+    min_stock_df: Optional[pd.DataFrame] = None,
+    threshold_df: Optional[pd.DataFrame] = None,
+    acceptance_df: Optional[pd.DataFrame] = None,
+) -> BytesIO:
+    sheets = [
+        (_SALES_SHEET, _ensure_columns(sales_stock_df, _SALES_STOCK_COLUMNS)),
+        (_SUPPLY_SHEET, _ensure_columns(supplies_df, _SUPPLY_COLUMNS)),
+        (
+            _FULFILLMENT_SHEET,
+            _ensure_columns(fulfillment_df, _FULFILLMENT_COLUMNS),
+        ),
+        (_MIN_STOCK_SHEET, _ensure_columns(min_stock_df, _MIN_STOCK_COLUMNS)),
+        (_THRESHOLD_SHEET, _ensure_columns(threshold_df, _THRESHOLD_COLUMNS)),
+        (_ACCEPTANCE_SHEET, _ensure_columns(acceptance_df, _ACCEPTANCE_COLUMNS)),
+    ]
 
     buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-        sales_stock.to_excel(writer, sheet_name=_SALES_SHEET, index=False)
-        supplies.to_excel(writer, sheet_name=_SUPPLY_SHEET, index=False)
-        min_stock.to_excel(writer, sheet_name=_MIN_STOCK_SHEET, index=False)
-        threshold.to_excel(writer, sheet_name=_THRESHOLD_SHEET, index=False)
+    try:
+        writer = pd.ExcelWriter(buffer, engine="xlsxwriter")
+    except ImportError:
+        writer = pd.ExcelWriter(buffer, engine="openpyxl")
+
+    with writer:
+        for sheet_name, dataframe in sheets:
+            dataframe.to_excel(writer, sheet_name=sheet_name, index=False)
+
     buffer.seek(0)
     return buffer
