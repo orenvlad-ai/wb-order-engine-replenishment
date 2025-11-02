@@ -8,7 +8,7 @@ import streamlit as st
 from engine.export_prototype import build_prototype_workbook
 from engine.transform import (
     sales_by_warehouse_from_details,
-    stock_snapshot_from_details_or_daily,
+    merge_sales_with_stock_today,
 )
 from wb_io.wb_readers import read_stock_history
 
@@ -31,10 +31,18 @@ if "validation_log" not in st.session_state:
     st.session_state["validation_log"] = ""
 
 
+_SALES_STOCK_COLUMNS = [
+    "Артикул продавца",
+    "Артикул WB",
+    "Склад",
+    "Заказали, шт",
+    "Остаток на сегодня",
+]
+
+
 def _process_files(files: list[BytesIO], names: list[str]) -> tuple[BytesIO | None, str]:
     logs: list[str] = []
-    sales_frames: list[pd.DataFrame] = []
-    stock_frames: list[pd.DataFrame] = []
+    combined_frames: list[pd.DataFrame] = []
 
     for file_bytes, name in zip(files, names):
         sheets = read_stock_history(file_bytes.getvalue(), name)
@@ -48,39 +56,23 @@ def _process_files(files: list[BytesIO], names: list[str]) -> tuple[BytesIO | No
         detail_sheet = next((df for title, df in sheets.items() if title.lower() == "детальная информация"), None)
         daily_sheet = next((df for title, df in sheets.items() if title.lower() == "остатки по дням"), None)
 
-        if detail_sheet is not None:
-            sales_df = sales_by_warehouse_from_details(detail_sheet)
-            if not sales_df.empty:
-                sales_frames.append(sales_df)
-        if daily_sheet is not None:
-            stock_df = stock_snapshot_from_details_or_daily(daily_sheet)
-            if not stock_df.empty:
-                stock_frames.append(stock_df)
+        sales_df = sales_by_warehouse_from_details(detail_sheet) if detail_sheet is not None else pd.DataFrame()
+        merged = merge_sales_with_stock_today(sales_df, detail_sheet, daily_sheet)
+        if not merged.empty:
+            combined_frames.append(merged)
 
-    if not sales_frames and not stock_frames:
-        logs.append("Не удалось получить данные для вкладок «Продажи по складам» и «Остатки на сегодня».")
-        return None, "\n".join(logs)
-
-    sales_result = pd.concat(sales_frames, ignore_index=True) if sales_frames else pd.DataFrame(columns=[
-        "Артикул продавца",
-        "Артикул WB",
-        "Склад",
-        "Заказали, шт",
-    ])
-    stock_result = pd.concat(stock_frames, ignore_index=True) if stock_frames else pd.DataFrame(columns=[
-        "Артикул продавца",
-        "Артикул WB",
-        "Остаток",
-    ])
+    if combined_frames:
+        sales_stock_result = pd.concat(combined_frames, ignore_index=True).reindex(columns=_SALES_STOCK_COLUMNS)
+    else:
+        sales_stock_result = pd.DataFrame(columns=_SALES_STOCK_COLUMNS)
 
     logs.append(
-        "Итог: вкладка «Продажи по складам» — {sales} строк, «Остатки на сегодня» — {stock} строк.".format(
-            sales=len(sales_result),
-            stock=len(stock_result),
+        "Итог: лист «Продажи и остатки по складам» — {rows} строк.".format(
+            rows=len(sales_stock_result),
         )
     )
 
-    workbook = build_prototype_workbook(sales_result, stock_result)
+    workbook = build_prototype_workbook(sales_stock_result)
     return workbook, "\n".join(logs)
 
 

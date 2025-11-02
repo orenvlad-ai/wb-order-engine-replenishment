@@ -12,10 +12,18 @@ from fastapi.templating import Jinja2Templates
 from wb_io.wb_readers import read_stock_history, read_stock_snapshot
 from engine.transform import (
     sales_by_warehouse_from_details,
-    stock_snapshot_from_details_or_daily,
+    merge_sales_with_stock_today,
     stock_from_snapshot,
 )
 from engine.export_prototype import build_prototype_workbook
+
+_SALES_STOCK_COLUMNS = [
+    "Артикул продавца",
+    "Артикул WB",
+    "Склад",
+    "Заказали, шт",
+    "Остаток на сегодня",
+]
 
 app = FastAPI()
 templates = Jinja2Templates(directory="server/templates")
@@ -34,8 +42,7 @@ async def index(request: Request):
 @app.post("/build")
 async def build(files: List[UploadFile] = File(...)):
     logs: List[str] = []
-    sales_frames: List[pd.DataFrame] = []
-    stock_frames: List[pd.DataFrame] = []
+    combined_frames: List[pd.DataFrame] = []
 
     if not files:
         return JSONResponse({"ok": False, "log": "Файлы не переданы"}, status_code=400)
@@ -47,7 +54,11 @@ async def build(files: List[UploadFile] = File(...)):
             if snapshot_df is not None:
                 df_stock = stock_from_snapshot(snapshot_df)
                 if not df_stock.empty:
-                    stock_frames.append(df_stock)
+                    df_stock = df_stock.rename(columns={"Остаток": "Остаток на сегодня"})
+                    df_stock["Заказали, шт"] = 0
+                    df_stock["Склад"] = df_stock["Склад"].fillna("-").replace("", "-")
+                    df_stock = df_stock[_SALES_STOCK_COLUMNS]
+                    combined_frames.append(df_stock)
                 logs.append(
                     f"{f.filename}: источник «Остатки по складам» — {len(df_stock)} строк"
                 )
@@ -61,32 +72,25 @@ async def build(files: List[UploadFile] = File(...)):
             detail = sheets.get("Детальная информация")
             daily = sheets.get("Остатки по дням")
 
-            if detail is not None:
-                df_sales = sales_by_warehouse_from_details(detail)
-                if not df_sales.empty:
-                    sales_frames.append(df_sales)
+            df_sales = sales_by_warehouse_from_details(detail) if detail is not None else pd.DataFrame()
+            merged = merge_sales_with_stock_today(df_sales, detail, daily)
+            if not merged.empty:
+                combined_frames.append(merged)
 
-            stock_rows = 0
-            if daily is not None:
-                df_stock = stock_snapshot_from_details_or_daily(daily)
-                if not df_stock.empty:
-                    stock_rows = len(df_stock)
-                    stock_frames.append(df_stock)
+            logs.append(
+                f"{f.filename}: источник «История остатков» — {len(merged)} строк"
+            )
 
-            logs.append(f"{f.filename}: источник «История остатков» — {stock_rows} строк")
-
-        sales = pd.concat(sales_frames, ignore_index=True) if sales_frames else pd.DataFrame(
-            columns=["Артикул продавца","Артикул WB","Склад","Заказали, шт"]
-        )
-        stock_columns = ["Артикул продавца", "Артикул WB", "Склад", "Остаток"]
-        if stock_frames:
-            stock = pd.concat(stock_frames, ignore_index=True).reindex(columns=stock_columns)
+        if combined_frames:
+            sales_stock = pd.concat(combined_frames, ignore_index=True).reindex(columns=_SALES_STOCK_COLUMNS)
         else:
-            stock = pd.DataFrame(columns=stock_columns)
+            sales_stock = pd.DataFrame(columns=_SALES_STOCK_COLUMNS)
 
-        logs.append(f"Итог: «Продажи по складам» — {len(sales)}; «Остатки на сегодня» — {len(stock)}.")
+        logs.append(
+            f"Итог: «Продажи и остатки по складам» — {len(sales_stock)}."
+        )
 
-        bio: BytesIO = build_prototype_workbook(sales, stock)
+        bio: BytesIO = build_prototype_workbook(sales_stock)
         token = secrets.token_urlsafe(16)
         _memory_artifacts[token] = bio.getvalue()
 
