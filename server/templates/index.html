@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="ru" class="h-full">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WB Order Engine — валидация парсинга</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: {
+                            DEFAULT: '#7c3aed',
+                            hover: '#6d28d9'
+                        },
+                        secondary: {
+                            DEFAULT: '#64748b',
+                            hover: '#475569'
+                        }
+                    }
+                }
+            }
+        };
+    </script>
+    <style>[x-cloak] { display: none !important; }</style>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body class="min-h-full bg-slate-100 py-12">
+<div class="container mx-auto px-4" x-data="uploadForm()">
+    <div class="mx-auto w-full max-w-3xl rounded-3xl bg-white p-10 shadow-2xl shadow-primary/10">
+        <div class="mb-8">
+            <h1 class="text-2xl font-semibold text-slate-900">WB Order Engine — валидация парсинга</h1>
+            <p class="mt-2 text-sm text-slate-500">Загрузите отчёты истории остатков, соберите валидационный инпут и скачайте Excel-шаблон.</p>
+        </div>
+        <form @submit.prevent="submit" class="space-y-8">
+            <div class="grid grid-cols-1 gap-6 md:grid-cols-2">
+                <div class="md:col-span-2">
+                    <div
+                        class="flex h-48 w-full cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-slate-50 transition hover:border-primary hover:bg-primary/5"
+                        :class="{ 'border-primary bg-primary/5': isDragOver }"
+                        @click="browse"
+                        @dragover.prevent="isDragOver = true"
+                        @dragleave.prevent="isDragOver = false"
+                        @drop.prevent="handleDrop"
+                    >
+                        <input type="file" name="files" multiple accept=".xlsx,.xls,.csv" class="hidden" x-ref="fileInput" @change="handleFilesChange">
+                        <div class="flex flex-col items-center text-center">
+                            <div class="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-primary">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-3-6L12 3m0 0L6 10.5m6-7.5V15" />
+                                </svg>
+                            </div>
+                            <p class="mt-4 text-base font-medium text-slate-700">Перетащите файлы или нажмите для выбора</p>
+                            <p class="mt-1 text-xs text-slate-400">Поддерживаются отчёты .xlsx, .xls, .csv</p>
+                            <template x-if="files.length">
+                                <ul class="mt-4 max-h-24 w-full overflow-y-auto text-left text-sm text-slate-600">
+                                    <template x-for="file in files" :key="file.name">
+                                        <li class="truncate border-b border-slate-200 py-1 last:border-none" x-text="file.name"></li>
+                                    </template>
+                                </ul>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="flex flex-col gap-3 md:flex-row md:justify-end">
+                <button type="button" class="order-2 rounded-xl border border-secondary bg-white px-6 py-3 text-sm font-semibold text-secondary transition hover:border-secondary-hover hover:text-secondary-hover disabled:cursor-not-allowed disabled:border-slate-300 disabled:text-slate-300" @click="resetForm" :disabled="loading">
+                    Очистить
+                </button>
+                <button type="submit" class="order-1 flex items-center justify-center rounded-xl bg-primary px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-primary/30 transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:bg-slate-300" :disabled="loading">
+                    <svg x-show="loading" xmlns="http://www.w3.org/2000/svg" class="mr-2 h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v3m0 9v3m7.5-7.5h-3m-9 0h-3m12.364-5.364l-2.121 2.121m-6.364 6.364l-2.121 2.121m0-10.606l2.121 2.121m6.364 6.364l2.121 2.121" />
+                    </svg>
+                    <span>Собрать валидационный инпут</span>
+                </button>
+            </div>
+        </form>
+        <div class="mt-10 space-y-4">
+            <div class="flex items-center justify-between">
+                <h2 class="text-lg font-semibold text-slate-800">Лог обработки</h2>
+                <button type="button" class="text-sm font-medium text-primary hover:text-primary-hover" @click="toggleLog()">
+                    <span x-show="showLog" x-cloak>Скрыть</span>
+                    <span x-show="!showLog" x-cloak>Показать</span>
+                </button>
+            </div>
+            <div x-show="showLog" x-transition x-cloak class="h-48 overflow-y-auto rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600" x-ref="logContainer">
+                <template x-if="!log.length">
+                    <p class="text-slate-400">Лог появится после обработки файлов.</p>
+                </template>
+                <template x-for="(entry, index) in log" :key="index">
+                    <p class="whitespace-pre-line" x-text="entry"></p>
+                </template>
+            </div>
+            <div class="flex justify-end">
+                <button type="button" class="rounded-xl border border-primary bg-white px-6 py-3 text-sm font-semibold text-primary transition hover:border-primary-hover hover:text-primary-hover disabled:cursor-not-allowed disabled:border-slate-300 disabled:text-slate-300" @click="download" :disabled="!downloadToken">
+                    Скачать Excel
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+    function uploadForm() {
+        return {
+            files: [],
+            log: [],
+            loading: false,
+            showLog: true,
+            downloadToken: null,
+            isDragOver: false,
+            browse() {
+                if (this.loading) {
+                    return;
+                }
+                this.$refs.fileInput.click();
+            },
+            handleFilesChange(event) {
+                if (this.loading) {
+                    return;
+                }
+                this.isDragOver = false;
+                this.files = Array.from(event.target.files || []);
+            },
+            handleDrop(event) {
+                if (this.loading) {
+                    return;
+                }
+                this.isDragOver = false;
+                const droppedFiles = event.dataTransfer?.files;
+                if (!droppedFiles || !droppedFiles.length) {
+                    return;
+                }
+                const dataTransfer = new DataTransfer();
+                Array.from(droppedFiles).forEach((file) => dataTransfer.items.add(file));
+                this.$refs.fileInput.files = dataTransfer.files;
+                this.files = Array.from(dataTransfer.files);
+            },
+            appendLog(message) {
+                const timestamp = new Date().toLocaleTimeString();
+                this.log.push(`[${timestamp}] ${message}`);
+                this.$nextTick(() => {
+                    if (this.$refs.logContainer) {
+                        this.$refs.logContainer.scrollTop = this.$refs.logContainer.scrollHeight;
+                    }
+                });
+            },
+            resetForm() {
+                if (this.loading) {
+                    return;
+                }
+                this.files = [];
+                this.log = [];
+                this.downloadToken = null;
+                this.showLog = true;
+                this.isDragOver = false;
+                if (this.$refs.fileInput) {
+                    this.$refs.fileInput.value = '';
+                }
+            },
+            toggleLog() {
+                this.showLog = !this.showLog;
+            },
+            async submit() {
+                if (this.loading) {
+                    return;
+                }
+                if (!this.files.length) {
+                    this.appendLog('Добавьте хотя бы один файл перед запуском.');
+                    return;
+                }
+                this.loading = true;
+                this.downloadToken = null;
+                this.appendLog('Отправка файлов на обработку...');
+                const formData = new FormData();
+                this.files.forEach((file) => formData.append('files', file));
+                try {
+                    const response = await fetch('/build', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    if (!response.ok) {
+                        throw new Error(`Ошибка сервера ${response.status}`);
+                    }
+                    const data = await response.json();
+                    if (Array.isArray(data.log)) {
+                        data.log.forEach((entry) => this.appendLog(entry));
+                    } else if (data.log) {
+                        this.appendLog(String(data.log));
+                    }
+                    if (data.ok && data.download_token) {
+                        this.downloadToken = data.download_token;
+                    }
+                    if (!data.ok) {
+                        this.appendLog('Сборка завершилась с ошибками.');
+                    }
+                } catch (error) {
+                    this.appendLog(`Не удалось выполнить запрос: ${error.message}`);
+                } finally {
+                    this.loading = false;
+                }
+            },
+            download() {
+                if (!this.downloadToken || this.loading) {
+                    return;
+                }
+                window.location.href = `/download/${this.downloadToken}`;
+            }
+        };
+    }
+</script>
+</body>
+</html>
