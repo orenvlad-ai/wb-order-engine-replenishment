@@ -9,10 +9,11 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from wb_io.wb_readers import read_stock_history
+from wb_io.wb_readers import read_stock_history, read_stock_snapshot
 from engine.transform import (
     sales_by_warehouse_from_details,
     stock_snapshot_from_details_or_daily,
+    stock_from_snapshot,
 )
 from engine.export_prototype import build_prototype_workbook
 
@@ -42,12 +43,20 @@ async def build(files: List[UploadFile] = File(...)):
     try:
         for f in files:
             raw = await f.read()
-            sheets = read_stock_history(raw, f.filename)
-            if not sheets:
-                logs.append(f"{f.filename}: не распознаны листы")
+            snapshot_df = read_stock_snapshot(raw, f.filename)
+            if snapshot_df is not None:
+                df_stock = stock_from_snapshot(snapshot_df)
+                if not df_stock.empty:
+                    stock_frames.append(df_stock)
+                logs.append(
+                    f"{f.filename}: источник «Остатки по складам» — {len(df_stock)} строк"
+                )
                 continue
 
-            logs.append(f"{f.filename}: распознаны листы — {', '.join(sheets.keys())}")
+            sheets = read_stock_history(raw, f.filename)
+            if not sheets:
+                logs.append(f"{f.filename}: источник не распознан")
+                continue
 
             detail = sheets.get("Детальная информация")
             daily = sheets.get("Остатки по дням")
@@ -57,17 +66,23 @@ async def build(files: List[UploadFile] = File(...)):
                 if not df_sales.empty:
                     sales_frames.append(df_sales)
 
+            stock_rows = 0
             if daily is not None:
                 df_stock = stock_snapshot_from_details_or_daily(daily)
                 if not df_stock.empty:
+                    stock_rows = len(df_stock)
                     stock_frames.append(df_stock)
+
+            logs.append(f"{f.filename}: источник «История остатков» — {stock_rows} строк")
 
         sales = pd.concat(sales_frames, ignore_index=True) if sales_frames else pd.DataFrame(
             columns=["Артикул продавца","Артикул WB","Склад","Заказали, шт"]
         )
-        stock = pd.concat(stock_frames, ignore_index=True) if stock_frames else pd.DataFrame(
-            columns=["Артикул продавца","Артикул WB","Остаток"]
-        )
+        stock_columns = ["Артикул продавца", "Артикул WB", "Склад", "Остаток"]
+        if stock_frames:
+            stock = pd.concat(stock_frames, ignore_index=True).reindex(columns=stock_columns)
+        else:
+            stock = pd.DataFrame(columns=stock_columns)
 
         logs.append(f"Итог: «Продажи по складам» — {len(sales)}; «Остатки на сегодня» — {len(stock)}.")
 

@@ -5,7 +5,7 @@ import pandas as pd
 
 
 _SALES_COLUMNS = ["Склад", "Артикул продавца", "Артикул WB", "Заказали, шт"]
-_STOCK_COLUMNS = ["Артикул продавца", "Артикул WB", "Остаток"]
+_STOCK_COLUMNS = ["Артикул продавца", "Артикул WB", "Склад", "Остаток"]
 
 
 def _find_column(df: pd.DataFrame, target: str) -> str | None:
@@ -66,12 +66,22 @@ def _pick_latest_date_column(df: pd.DataFrame) -> str | None:
 
 
 def stock_snapshot_from_details_or_daily(df: pd.DataFrame) -> pd.DataFrame:
-    data = _prepare_required_columns(df, _STOCK_COLUMNS[:-1])
+    base_columns = _STOCK_COLUMNS[:-2]
+    data = _prepare_required_columns(df, base_columns)
     latest_column = _pick_latest_date_column(df)
     if latest_column is None:
         return pd.DataFrame(columns=_STOCK_COLUMNS)
 
     stock_series = _to_numeric(df[latest_column])
     data["Остаток"] = stock_series.fillna(0)
+    data["Склад"] = "-"
     data = _drop_totals(data)
-    return data.reset_index(drop=True)
+    return data[_STOCK_COLUMNS].reset_index(drop=True)
+
+
+def stock_from_snapshot(df: pd.DataFrame) -> pd.DataFrame:
+    data = _prepare_required_columns(df, _STOCK_COLUMNS)
+    if "Остаток" in data.columns:
+        data["Остаток"] = _to_numeric(data["Остаток"]).fillna(0)
+    data = _drop_totals(data)
+    return data[_STOCK_COLUMNS].reset_index(drop=True)
