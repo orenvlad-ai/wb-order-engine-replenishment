@@ -1,145 +1,92 @@
 from __future__ import annotations
-
-import asyncio
-from collections import deque
 from io import BytesIO
-from typing import Deque, Dict, List
-from uuid import uuid4
+import secrets
+from typing import Dict, List
 
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, UploadFile, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from engine.export_prototype import build_prototype_workbook
+from wb_io.wb_readers import read_stock_history
 from engine.transform import (
     sales_by_warehouse_from_details,
     stock_snapshot_from_details_or_daily,
 )
-from wb_io.wb_readers import read_stock_history
+from engine.export_prototype import build_prototype_workbook
 
 app = FastAPI()
 templates = Jinja2Templates(directory="server/templates")
 
-# Ограничение на количество сохранённых файлов в памяти, чтобы не раздувать хранилище.
-MAX_STORED_WORKBOOKS = 20
-_generated_workbooks: Dict[str, BytesIO] = {}
-_generation_order: Deque[str] = deque()
-_lock = asyncio.Lock()
+try:
+    app.mount("/static", StaticFiles(directory="server/static"), name="static")
+except Exception:
+    pass
 
-
-async def _store_workbook(token: str, workbook: BytesIO) -> None:
-    async with _lock:
-        if token not in _generated_workbooks:
-            if len(_generation_order) >= MAX_STORED_WORKBOOKS:
-                oldest = _generation_order.popleft()
-                _generated_workbooks.pop(oldest, None)
-            _generation_order.append(token)
-        _generated_workbooks[token] = workbook
-
-
-async def _get_workbook(token: str) -> BytesIO | None:
-    async with _lock:
-        return _generated_workbooks.get(token)
-
+_memory_artifacts: Dict[str, bytes] = {}
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request) -> HTMLResponse:
+async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
-
 @app.post("/build")
-async def build_validation_input(files: List[UploadFile] = File(...)) -> JSONResponse:
-    if not files:
-        raise HTTPException(status_code=400, detail="Не переданы файлы")
-
+async def build(files: List[UploadFile] = File(...)):
+    logs: List[str] = []
     sales_frames: List[pd.DataFrame] = []
     stock_frames: List[pd.DataFrame] = []
-    log: List[str] = []
 
-    for upload in files:
-        content = await upload.read()
-        filename = upload.filename or "Безымянный файл"
+    if not files:
+        return JSONResponse({"ok": False, "log": "Файлы не переданы"}, status_code=400)
 
-        try:
-            sheets = read_stock_history(content, filename)
-        except Exception as exc:  # noqa: BLE001 - важно зафиксировать ошибку чтения
-            log.append(f"{filename}: не удалось прочитать файл ({exc})")
-            continue
+    try:
+        for f in files:
+            raw = await f.read()
+            sheets = read_stock_history(raw, f.filename)
+            if not sheets:
+                logs.append(f"{f.filename}: не распознаны листы")
+                continue
 
-        if not sheets:
-            log.append(f"{filename}: листы не найдены")
-            continue
+            logs.append(f"{f.filename}: распознаны листы — {', '.join(sheets.keys())}")
 
-        log.append(f"{filename}: найдено листов {len(sheets)}")
+            detail = sheets.get("Детальная информация")
+            daily = sheets.get("Остатки по дням")
 
-        for title, df in sheets.items():
-            sheet_name = title.strip()
-            log.append(f"— «{sheet_name}»: {len(df)} строк")
+            if detail is not None:
+                df_sales = sales_by_warehouse_from_details(detail)
+                if not df_sales.empty:
+                    sales_frames.append(df_sales)
 
-            if sheet_name.lower().startswith("детал"):
-                try:
-                    sales_df = sales_by_warehouse_from_details(df)
-                except Exception as exc:  # noqa: BLE001
-                    log.append(f"    Ошибка обработки продаж: {exc}")
-                    continue
+            if daily is not None:
+                df_stock = stock_snapshot_from_details_or_daily(daily)
+                if not df_stock.empty:
+                    stock_frames.append(df_stock)
 
-                if not sales_df.empty:
-                    sales_frames.append(sales_df)
-                    log.append(f"    Продажи: {len(sales_df)} строк")
-                else:
-                    log.append("    Продажи: нет данных")
-
-            if sheet_name.lower().startswith("остат"):
-                try:
-                    stock_df = stock_snapshot_from_details_or_daily(df)
-                except Exception as exc:  # noqa: BLE001
-                    log.append(f"    Ошибка обработки остатков: {exc}")
-                    continue
-
-                if not stock_df.empty:
-                    stock_frames.append(stock_df)
-                    log.append(f"    Остатки: {len(stock_df)} строк")
-                else:
-                    log.append("    Остатки: нет данных")
-
-    if not sales_frames and not stock_frames:
-        raise HTTPException(status_code=400, detail="Не удалось собрать данные из файлов")
-
-    sales_df = _concat_frames(sales_frames)
-    stock_df = _concat_frames(stock_frames)
-
-    log.append(
-        "Итог: вкладка «Продажи по складам» — {sales} строк, «Остатки на сегодня» — {stock} строк.".format(
-            sales=len(sales_df),
-            stock=len(stock_df),
+        sales = pd.concat(sales_frames, ignore_index=True) if sales_frames else pd.DataFrame(
+            columns=["Артикул продавца","Артикул WB","Склад","Заказали, шт"]
         )
-    )
+        stock = pd.concat(stock_frames, ignore_index=True) if stock_frames else pd.DataFrame(
+            columns=["Артикул продавца","Артикул WB","Остаток"]
+        )
 
-    workbook = build_prototype_workbook(sales_df, stock_df)
-    workbook.seek(0)
-    download_token = uuid4().hex
-    await _store_workbook(download_token, workbook)
+        logs.append(f"Итог: «Продажи по складам» — {len(sales)}; «Остатки на сегодня» — {len(stock)}.")
 
-    return JSONResponse({
-        "ok": True,
-        "log": log,
-        "download_token": download_token,
-    })
+        bio: BytesIO = build_prototype_workbook(sales, stock)
+        token = secrets.token_urlsafe(16)
+        _memory_artifacts[token] = bio.getvalue()
 
+        return {"ok": True, "log": "\n".join(logs), "download_token": token}
+
+    except Exception as e:
+        return JSONResponse({"ok": False, "log": "\n".join(logs + [f'Ошибка: {e}'])}, status_code=500)
 
 @app.get("/download/{token}")
-async def download_workbook(token: str) -> StreamingResponse:
-    workbook = await _get_workbook(token)
-    if workbook is None:
-        raise HTTPException(status_code=404, detail="Файл не найден или срок действия истёк")
-
-    workbook.seek(0)
-    headers = {"Content-Disposition": "attachment; filename=Input_Prototype_Filled.xlsx"}
-    return StreamingResponse(workbook, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
-
-
-def _concat_frames(frames: List[pd.DataFrame]) -> pd.DataFrame:
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+async def download(token: str):
+    data = _memory_artifacts.pop(token, None)
+    if not data:
+        return JSONResponse({"ok": False, "log": "Файл не найден или срок истёк"}, status_code=404)
+    return StreamingResponse(
+        BytesIO(data),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="Input_Prototype_Filled.xlsx"'},
+    )
