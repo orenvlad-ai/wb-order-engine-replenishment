@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from wb_io.wb_readers import read_stock_history, read_stock_snapshot
+from wb_io.wb_readers import read_stock_history, read_stock_snapshot, read_intransit_file
 from engine.transform import (
     sales_by_warehouse_from_details,
     merge_sales_with_stock_today,
@@ -43,6 +43,7 @@ async def index(request: Request):
 async def build(files: List[UploadFile] = File(...)):
     logs: List[str] = []
     combined_frames: List[pd.DataFrame] = []
+    supplies_frames: List[pd.DataFrame] = []
 
     if not files:
         return JSONResponse({"ok": False, "log": "Файлы не переданы"}, status_code=400)
@@ -50,6 +51,13 @@ async def build(files: List[UploadFile] = File(...)):
     try:
         for f in files:
             raw = await f.read()
+            intransit_df = read_intransit_file(raw, f.filename)
+            if intransit_df.attrs.get("intransit"):
+                supplies_frames.append(intransit_df)
+                logs.append(
+                    f"{f.filename}: источник «Поставки в пути» — {len(intransit_df)} строк"
+                )
+                continue
             snapshot_df = read_stock_snapshot(raw, f.filename)
             if snapshot_df is not None:
                 df_stock = stock_from_snapshot(snapshot_df)
@@ -90,10 +98,16 @@ async def build(files: List[UploadFile] = File(...)):
             f"Итог: «Продажи и остатки по складам» — {len(sales_stock)}."
         )
 
-        bio: BytesIO = build_prototype_workbook(sales_stock)
+        supplies_df = pd.concat(supplies_frames, ignore_index=True) if supplies_frames else None
+        bio: BytesIO = build_prototype_workbook(
+            sales_stock,
+            supplies_df=supplies_df,
+        )
         token = secrets.token_urlsafe(16)
         _memory_artifacts[token] = bio.getvalue()
 
+        if supplies_df is not None:
+            logs.append(f"Итог: «Поставки в пути» — {len(supplies_df)} строк")
         return {"ok": True, "log": "\n".join(logs), "download_token": token}
 
     except Exception as e:

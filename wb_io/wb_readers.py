@@ -1,8 +1,10 @@
 import io
+import os
 from typing import Dict, Iterable, List, Optional
 
 import pandas as pd
 from openpyxl import load_workbook
+from zipfile import BadZipFile
 
 
 _DETAIL_REQUIRED = ["Склад", "Артикул продавца", "Артикул WB", "Заказали, шт"]
@@ -32,6 +34,31 @@ _SNAPSHOT_ALIASES = {
         "доступный остаток",
         "количество",
         "в наличии",
+    },
+}
+_INTRANSIT_COLUMNS = ["Артикул продавца", "Артикул WB", "Склад", "Количество"]
+_INTRANSIT_ALIASES = {
+    "Артикул продавца": {
+        "артикул продавца",
+        "артикул поставщика",
+        "артикул",
+        "арт",
+    },
+    "Артикул WB": {
+        "артикул wb",
+        "арт wb",
+        "код номенклатуры",
+        "код товара",
+        "артикул wildberries",
+        "артикул wb.",
+    },
+    "Количество": {
+        "количество, шт.",
+        "количество",
+        "кол-во",
+        "количество шт",
+        "qty",
+        "шт",
     },
 }
 _TARGET_SHEETS = {
@@ -236,3 +263,117 @@ def read_stock_snapshot(file_bytes: bytes, filename: str | None = None) -> Optio
         return None
 
     return df[_SNAPSHOT_REQUIRED]
+
+
+def read_intransit_file(data: bytes, filename: str) -> pd.DataFrame:
+    """Прочитать файл с поставками в пути и вернуть подготовленный DataFrame."""
+
+    def _warehouse_name() -> str:
+        base = os.path.splitext(os.path.basename(filename or ""))[0]
+        return base.strip()
+
+    def _prepare_dataframe(df: pd.DataFrame | None) -> pd.DataFrame | None:
+        if df is None or df.empty:
+            return None
+
+        cleaned = df.dropna(how="all").dropna(axis=1, how="all")
+        if cleaned.empty:
+            return None
+
+        cleaned.columns = [str(col).strip() for col in cleaned.columns]
+        normalized = {_normalize_header_value(col): col for col in cleaned.columns}
+
+        mapping: Dict[str, str] = {}
+        for target, aliases in _INTRANSIT_ALIASES.items():
+            for alias in aliases:
+                column = normalized.get(alias)
+                if column:
+                    mapping[target] = column
+                    break
+
+        if "Количество" not in mapping:
+            return None
+        if "Артикул продавца" not in mapping and "Артикул WB" not in mapping:
+            return None
+
+        result = pd.DataFrame(index=cleaned.index)
+
+        def _normalize_article(series: pd.Series) -> pd.Series:
+            def _convert(value: object) -> Optional[str]:
+                if pd.isna(value):
+                    return None
+                text = str(value).strip()
+                if not text:
+                    return None
+                if text.lower() in {"nan", "none", "null"}:
+                    return None
+                return text or None
+
+            return series.map(_convert)
+
+        def _normalize_quantity(series: pd.Series) -> pd.Series:
+            prepared = (
+                series.astype(str)
+                .str.replace("\xa0", "", regex=False)
+                .str.replace(" ", "", regex=False)
+                .str.replace(",", ".", regex=False)
+                .str.strip()
+            )
+            numeric = pd.to_numeric(prepared, errors="coerce").fillna(0)
+            return numeric.round().astype(int)
+
+        seller_column = mapping.get("Артикул продавца")
+        wb_column = mapping.get("Артикул WB")
+        qty_column = mapping["Количество"]
+
+        if seller_column:
+            result["Артикул продавца"] = _normalize_article(cleaned[seller_column])
+        else:
+            result["Артикул продавца"] = pd.Series([None] * len(cleaned), index=cleaned.index)
+
+        if wb_column:
+            result["Артикул WB"] = _normalize_article(cleaned[wb_column])
+        else:
+            result["Артикул WB"] = pd.Series([None] * len(cleaned), index=cleaned.index)
+
+        result["Количество"] = _normalize_quantity(cleaned[qty_column])
+        result["Склад"] = _warehouse_name() or ""
+
+        mask = (
+            result["Количество"] > 0
+        ) & (~result["Артикул продавца"].isna() | ~result["Артикул WB"].isna())
+
+        filtered = result.loc[mask, _INTRANSIT_COLUMNS]
+        filtered.attrs["intransit"] = True
+        return filtered.reset_index(drop=True)
+
+    # Пытаемся прочитать как Excel (шапка может быть на первой или второй строке)
+    for header in (0, 1):
+        try:
+            excel_df = pd.read_excel(io.BytesIO(data), header=header, engine="openpyxl")
+        except (BadZipFile, ValueError, TypeError):
+            excel_df = None
+        except Exception:
+            continue
+        prepared = _prepare_dataframe(excel_df)
+        if prepared is not None:
+            return prepared
+
+    # Если Excel не подошёл, пробуем CSV с разными кодировками
+    for header in (0, 1):
+        for encoding in ("utf-8-sig", "utf-8", "cp1251", "utf-16"):
+            try:
+                csv_df = pd.read_csv(
+                    io.BytesIO(data),
+                    header=header,
+                    encoding=encoding,
+                    sep=None,
+                    engine="python",
+                )
+            except Exception:
+                continue
+            prepared = _prepare_dataframe(csv_df)
+            if prepared is not None:
+                return prepared
+
+    return pd.DataFrame(columns=_INTRANSIT_COLUMNS)
