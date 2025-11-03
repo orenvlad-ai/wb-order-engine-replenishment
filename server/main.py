@@ -8,6 +8,7 @@ from fastapi import FastAPI, File, UploadFile, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from openpyxl import Workbook
 
 from wb_io.wb_readers import (
     read_stock_history,
@@ -43,6 +44,27 @@ _memory_artifacts: Dict[str, bytes] = {}
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
+
+
+@app.get("/download/fulfillment_template.xlsx")
+async def download_fulfillment_template():
+    """Генерирует и отдает XLSX-шаблон «Остатки Фулфилмент»"""
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Шаблон"
+    worksheet.append(["Артикул продавца", "Количество"])
+
+    buffer = BytesIO()
+    workbook.save(buffer)
+    buffer.seek(0)
+
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": 'attachment; filename="fulfillment_template.xlsx"'
+        },
+    )
 
 @app.post("/build")
 async def build(files: List[UploadFile] = File(...)):
