@@ -10,12 +10,12 @@
   <div class="max-w-3xl mx-auto p-6">
     <div class="bg-white shadow rounded-2xl p-6" x-data="ui()">
       <h1 class="text-2xl font-bold mb-4">Сбор валидационного инпута</h1>
-      <form @submit.prevent="build">
-        <label class="flex flex-col items-center justify-center w-full h-40 border-2 border-dashed rounded-xl text-slate-500 mb-3"
+      <form @submit.prevent="build()">
+        <label for="files" class="flex flex-col items-center justify-center w-full h-40 border-2 border-dashed rounded-xl text-slate-500 mb-3"
                @dragover.prevent
                @drop.prevent="onDrop($event)">
           <input type="file" id="files" name="files" multiple class="hidden" accept=".xlsx,.xls,.csv" @change="onPick">
-          <div class="text-center cursor-pointer" @click="$refs.pick.click()" x-ref="pick">
+          <div class="text-center cursor-pointer">
             <div class="text-4xl">⬆️</div>
             <div>Перетащите сюда файлы или нажмите для выбора</div>
             <div class="text-xs">Поддерживаются .xlsx, .xls, .csv</div>
