@@ -57,6 +57,17 @@ async def build(files: List[UploadFile] = File(...)):
     try:
         for f in files:
             raw = await f.read()
+
+            # 1) СНАЧАЛА: «Остатки Фулфилмент» (простой файл с двумя колонками)
+            fulfillment_one = read_fulfillment_stock_file(raw, f.filename)
+            if not fulfillment_one.empty:
+                fulfillment_frames.append(fulfillment_one)
+                logs.append(
+                    f"{f.filename}: источник «Остатки Фулфилмент» — {len(fulfillment_one)} строк"
+                )
+                continue
+
+            # 2) ЗАТЕМ: «Поставки в пути»
             intransit_df = read_intransit_file(raw, f.filename)
             if intransit_df.attrs.get("intransit"):
                 supplies_frames.append(intransit_df)
@@ -65,13 +76,7 @@ async def build(files: List[UploadFile] = File(...)):
                 )
                 continue
 
-            fulfillment_df = read_fulfillment_stock_file(raw, f.filename)
-            if not fulfillment_df.empty:
-                fulfillment_frames.append(fulfillment_df)
-                logs.append(
-                    f"{f.filename}: источник «Остатки Фулфилмент» — {len(fulfillment_df)} строк"
-                )
-                continue
+            # 3) ПОТОМ: «Остатки по складам» (снимок)
             snapshot_df = read_stock_snapshot(raw, f.filename)
             if snapshot_df is not None:
                 df_stock = stock_from_snapshot(snapshot_df)
@@ -86,6 +91,7 @@ async def build(files: List[UploadFile] = File(...)):
                 )
                 continue
 
+            # 4) ИНАЧЕ: «История остатков» (детали + по дням)
             sheets = read_stock_history(raw, f.filename)
             if not sheets:
                 logs.append(f"{f.filename}: источник не распознан")
