@@ -9,7 +9,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from wb_io.wb_readers import read_stock_history, read_stock_snapshot, read_intransit_file
+from wb_io.wb_readers import (
+    read_stock_history,
+    read_stock_snapshot,
+    read_intransit_file,
+    read_fulfillment_stock_file,
+)
 from engine.transform import (
     sales_by_warehouse_from_details,
     merge_sales_with_stock_today,
@@ -44,6 +49,7 @@ async def build(files: List[UploadFile] = File(...)):
     logs: List[str] = []
     combined_frames: List[pd.DataFrame] = []
     supplies_frames: List[pd.DataFrame] = []
+    fulfillment_frames: List[pd.DataFrame] = []
 
     if not files:
         return JSONResponse({"ok": False, "log": "Файлы не переданы"}, status_code=400)
@@ -56,6 +62,14 @@ async def build(files: List[UploadFile] = File(...)):
                 supplies_frames.append(intransit_df)
                 logs.append(
                     f"{f.filename}: источник «Поставки в пути» — {len(intransit_df)} строк"
+                )
+                continue
+
+            fulfillment_df = read_fulfillment_stock_file(raw, f.filename)
+            if not fulfillment_df.empty:
+                fulfillment_frames.append(fulfillment_df)
+                logs.append(
+                    f"{f.filename}: источник «Остатки Фулфилмент» — {len(fulfillment_df)} строк"
                 )
                 continue
             snapshot_df = read_stock_snapshot(raw, f.filename)
@@ -99,15 +113,25 @@ async def build(files: List[UploadFile] = File(...)):
         )
 
         supplies_df = pd.concat(supplies_frames, ignore_index=True) if supplies_frames else None
+        fulfillment_df = (
+            pd.concat(fulfillment_frames, ignore_index=True)
+            if fulfillment_frames
+            else None
+        )
         bio: BytesIO = build_prototype_workbook(
             sales_stock,
             supplies_df=supplies_df,
+            fulfillment_df=fulfillment_df,
         )
         token = secrets.token_urlsafe(16)
         _memory_artifacts[token] = bio.getvalue()
 
         if supplies_df is not None:
             logs.append(f"Итог: «Поставки в пути» — {len(supplies_df)} строк")
+        if fulfillment_df is not None:
+            logs.append(
+                f"Итог: «Остатки Фулфилмент» — {len(fulfillment_df)} строк"
+            )
         return {"ok": True, "log": "\n".join(logs), "download_token": token}
 
     except Exception as e:
