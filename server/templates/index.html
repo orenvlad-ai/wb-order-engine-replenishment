@@ -42,8 +42,19 @@
              class="px-4 py-2 rounded-lg border border-indigo-600 text-indigo-700">Скачать Excel</a>
         </div>
 
-        <h2 class="mt-6 font-semibold">Лог обработки</h2>
-        <pre class="bg-slate-50 p-3 rounded-lg text-sm text-slate-700 min-h-[120px]" x-text="log || 'Здесь появится ход обработки после запуска.'"></pre>
+        <div class="mt-6 flex items-center justify-between">
+          <h2 class="font-semibold">Лог обработки</h2>
+          <button type="button"
+                  class="text-sm px-3 py-1 rounded-md border border-slate-300 text-slate-700 hover:bg-slate-100"
+                  @click="copyLog"
+                  :disabled="!(log && log.length)">
+            Копировать лог
+          </button>
+        </div>
+        <pre class="bg-slate-50 p-3 rounded-lg text-sm text-slate-700 min-h-[120px] whitespace-pre-wrap"
+             x-ref="logBox"
+             x-text="log || 'Здесь появится ход обработки после запуска.'"></pre>
+        <p class="text-green-700 mt-2" x-show="copied" x-transition>Лог скопирован в буфер обмена</p>
         <p class="text-red-600 mt-2" x-text="error"></p>
       </form>
     </div>
@@ -56,6 +67,7 @@ function ui(){
     token: '',
     log: '',
     error: '',
+    copied: false,
     onPick(e){
       if(e.target.files && e.target.files.length){
         this.addFiles(e.target.files);
@@ -93,6 +105,16 @@ function ui(){
       const data = await res.json().catch(()=>({ok:false,log:'Неверный ответ сервера'}));
       if(!res.ok || !data.ok){ this.error = data.log || 'Ошибка'; return; }
       this.log = data.log; this.token = data.download_token;
+      this.copied = false;
+    },
+    async copyLog(){
+      try{
+        await navigator.clipboard.writeText(this.log || '');
+        this.copied = true;
+        setTimeout(()=> this.copied = false, 2000);
+      }catch(e){
+        this.error = 'Не удалось скопировать лог';
+      }
     }
   }
 }
