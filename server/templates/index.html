@@ -28,7 +28,7 @@
         </template>
 
         <div class="flex gap-3">
-          <button type="submit" class="px-4 py-2 rounded-lg bg-indigo-600 text-white">Собрать валидационный инпут</button>
+          <button type="submit" class="px-4 py-2 rounded-lg bg-green-600 hover:bg-green-700 text-white">Собрать валидационный инпут</button>
           <a :class="{'opacity-50 pointer-events-none': !token}" :href="token ? '/download/'+token : '#'"
              class="px-4 py-2 rounded-lg border border-indigo-600 text-indigo-700">Скачать Excel</a>
         </div>
