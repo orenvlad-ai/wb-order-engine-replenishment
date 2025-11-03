@@ -377,3 +377,77 @@ def read_intransit_file(data: bytes, filename: str) -> pd.DataFrame:
                 return prepared
 
     return pd.DataFrame(columns=_INTRANSIT_COLUMNS)
+
+
+def read_fulfillment_stock_file(data: bytes, filename: str) -> pd.DataFrame:
+    """
+    Парсит файл остатков Фулфилмента.
+    Ожидаемые колонки (любой из синонимов):
+      - Артикул продавца: ["артикул продавца", "артикул поставщика", "артикул"]
+      - Количество:       ["количество", "остаток", "кол-во", "шт"]
+    Возвращает DataFrame с колонками ["Артикул продавца", "Количество"].
+    """
+
+    df = pd.DataFrame()
+
+    # Пробуем прочитать как Excel с заголовками на первой или второй строке
+    for header in (0, 1):
+        try:
+            df = pd.read_excel(io.BytesIO(data), header=header, engine="openpyxl")
+            if not df.empty:
+                break
+        except (BadZipFile, ValueError):
+            df = pd.DataFrame()
+        except Exception:
+            continue
+
+    # Если Excel не прочитан, пробуем CSV с популярными кодировками
+    if df.empty:
+        for encoding in ("utf-16", "utf-8-sig", "utf-8", "cp1251"):
+            try:
+                df = pd.read_csv(
+                    io.BytesIO(data),
+                    header=0,
+                    encoding=encoding,
+                    sep=None,
+                    engine="python",
+                )
+                if not df.empty:
+                    break
+            except Exception:
+                continue
+
+    if df.empty:
+        return pd.DataFrame(columns=["Артикул продавца", "Количество"])
+
+    normalized = {str(column).strip().lower(): column for column in df.columns}
+
+    def _pick_column(options: Iterable[str]) -> Optional[str]:
+        for option in options:
+            if option in normalized:
+                return normalized[option]
+        return None
+
+    seller_column = _pick_column(["артикул продавца", "артикул поставщика", "артикул"])
+    quantity_column = _pick_column(["количество", "остаток", "кол-во", "шт"])
+
+    if seller_column is None or quantity_column is None:
+        return pd.DataFrame(columns=["Артикул продавца", "Количество"])
+
+    result = pd.DataFrame()
+    result["Артикул продавца"] = df[seller_column]
+    result["Количество"] = (
+        pd.to_numeric(
+            df[quantity_column]
+            .astype(str)
+            .str.replace("\xa0", "", regex=False)
+            .str.replace(" ", "", regex=False)
+            .str.replace(",", ".", regex=False),
+            errors="coerce",
+        )
+        .fillna(0)
+        .astype(int)
+    )
+
+    mask = (~result["Артикул продавца"].isna()) & (result["Количество"] > 0)
+    return result.loc[mask, ["Артикул продавца", "Количество"]].reset_index(drop=True)
