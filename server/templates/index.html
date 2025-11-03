@@ -11,7 +11,9 @@
     <div class="bg-white shadow rounded-2xl p-6" x-data="ui()">
       <h1 class="text-2xl font-bold mb-4">Сбор валидационного инпута</h1>
       <form @submit.prevent="build">
-        <label class="flex flex-col items-center justify-center w-full h-40 border-2 border-dashed rounded-xl text-slate-500 mb-3">
+        <label class="flex flex-col items-center justify-center w-full h-40 border-2 border-dashed rounded-xl text-slate-500 mb-3"
+               @dragover.prevent
+               @drop.prevent="onDrop($event)">
           <input type="file" id="files" name="files" multiple class="hidden" accept=".xlsx,.xls,.csv" @change="onPick">
           <div class="text-center cursor-pointer" @click="$refs.pick.click()" x-ref="pick">
             <div class="text-4xl">⬆️</div>
@@ -19,16 +21,23 @@
             <div class="text-xs">Поддерживаются .xlsx, .xls, .csv</div>
           </div>
         </label>
-        <template x-if="names.length">
-          <ul class="mb-4 space-y-1">
-            <template x-for="n in names" :key="n">
-              <li class="text-sm text-slate-600" x-text="n"></li>
+        <div class="mb-4" x-show="files.length">
+          <div class="text-sm text-slate-600 mb-1">
+            Выбрано файлов: <b x-text="files.length"></b>
+            <button type="button" class="ml-2 text-red-600 underline" @click="clearAll">Очистить</button>
+          </div>
+          <ul class="space-y-1 max-h-40 overflow-auto border rounded-lg p-2 bg-slate-50">
+            <template x-for="(f, idx) in files" :key="idx">
+              <li class="flex items-center justify-between text-sm">
+                <span x-text="formatName(f)"></span>
+                <button type="button" class="text-slate-500 hover:text-red-600" @click="remove(idx)">✕</button>
+              </li>
             </template>
           </ul>
-        </template>
+        </div>
 
         <div class="flex gap-3">
-          <button type="submit" class="px-4 py-2 rounded-lg bg-green-600 hover:bg-green-700 text-white">Собрать валидационный инпут</button>
+          <button type="submit" class="px-4 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700">Собрать валидационный инпут</button>
           <a :class="{'opacity-50 pointer-events-none': !token}" :href="token ? '/download/'+token : '#'"
              class="px-4 py-2 rounded-lg border border-indigo-600 text-indigo-700">Скачать Excel</a>
         </div>
@@ -43,17 +52,43 @@
 <script>
 function ui(){
   return {
-    names: [],
+    files: [],
     token: '',
     log: '',
     error: '',
-    onPick(e){ this.names = [...e.target.files].map(f=>`${f.name} — ${Math.round(f.size/1024)} КБ`) },
+    onPick(e){
+      if(e.target.files && e.target.files.length){
+        this.addFiles(e.target.files);
+        e.target.value = '';
+      }
+    },
+    onDrop(ev){
+      const dropped = [...ev.dataTransfer.files].filter(f => /\.(xlsx|xls|csv)$/i.test(f.name));
+      if(dropped.length){ this.addFiles(dropped); }
+    },
+    remove(idx){ this.files.splice(idx,1); },
+    clearAll(){
+      this.files = [];
+      const input = document.getElementById('files');
+      if(input){ input.value=''; }
+      this.token=''; this.log=''; this.error='';
+    },
+    addFiles(list){
+      const incoming = Array.from(list);
+      incoming.forEach(file => {
+        const duplicate = this.files.some(existing => existing.name === file.name && existing.size === file.size && existing.lastModified === file.lastModified);
+        if(!duplicate){ this.files.push(file); }
+      });
+    },
+    formatName(file){
+      const sizeKb = Math.max(1, Math.round(file.size / 1024));
+      return `${file.name} — ${sizeKb} КБ`;
+    },
     async build(){
       this.error=''; this.log=''; this.token='';
-      const input = document.getElementById('files');
-      if(!input.files.length){ this.error='Добавьте файл отчёта.'; return; }
+      if(!this.files.length){ this.error='Добавьте хотя бы один файл отчёта.'; return; }
       const fd = new FormData();
-      [...input.files].forEach(f=>fd.append('files', f));
+      this.files.forEach(f=>fd.append('files', f));
       const res = await fetch('/build', { method:'POST', body: fd });
       const data = await res.json().catch(()=>({ok:false,log:'Неверный ответ сервера'}));
       if(!res.ok || !data.ok){ this.error = data.log || 'Ошибка'; return; }
