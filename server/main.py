@@ -1,6 +1,7 @@
 from __future__ import annotations
 from io import BytesIO
 import secrets
+import traceback
 from typing import Dict, List
 
 import pandas as pd
@@ -164,7 +165,11 @@ async def build(files: List[UploadFile] = File(...)):
         return {"ok": True, "log": "\n".join(logs), "download_token": token}
 
     except Exception as e:
-        return JSONResponse({"ok": False, "log": "\n".join(logs + [f'Ошибка: {e}'])}, status_code=500)
+        tb = traceback.format_exc()
+        return JSONResponse(
+            {"ok": False, "log": "\n".join(logs + [f'Ошибка: {e}', "TRACEBACK:", tb])},
+            status_code=500,
+        )
 
 @app.get("/download/{token}")
 async def download(token: str):
