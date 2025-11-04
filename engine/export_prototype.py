@@ -10,6 +10,7 @@ _MIN_STOCK_SHEET = "MinStock"
 _THRESHOLD_SHEET = "Порог загрузки транспорта"
 _ACCEPTANCE_SHEET = "Окна приёмки"
 _STOCK_DAILY_SHEET = "История остатков по дням"
+_STOCK_DAILY_ID_COLS = ["Артикул продавца", "Артикул WB"]
 _STOCK_DAILY_COLUMNS = [
     "Артикул продавца",
     "Артикул WB",
@@ -45,6 +46,17 @@ def _ensure_columns(
     return df.loc[:, list(columns)] if df.size else df.reindex(columns=columns)
 
 
+def _prepare_daily_sheet(df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+        return pd.DataFrame(columns=_STOCK_DAILY_ID_COLS)
+    out = df.copy()
+    for c in _STOCK_DAILY_ID_COLS:
+        if c not in out.columns:
+            out[c] = pd.Series(dtype="object")
+    other = [c for c in out.columns if c not in _STOCK_DAILY_ID_COLS]
+    return out[_STOCK_DAILY_ID_COLS + other]
+
+
 def build_prototype_workbook(
     sales_stock_df: Optional[pd.DataFrame] = None,
     supplies_df: Optional[pd.DataFrame] = None,
@@ -64,11 +76,8 @@ def build_prototype_workbook(
         (_MIN_STOCK_SHEET, _ensure_columns(min_stock_df, _MIN_STOCK_COLUMNS)),
         (_THRESHOLD_SHEET, _ensure_columns(threshold_df, _THRESHOLD_COLUMNS)),
         (_ACCEPTANCE_SHEET, _ensure_columns(acceptance_df, _ACCEPTANCE_COLUMNS)),
-        # Пустой шаблон для будущих ежедневных остатков (по сети)
-        (
-            _STOCK_DAILY_SHEET,
-            _ensure_columns(daily_stock_df, _STOCK_DAILY_COLUMNS),
-        ),
+        # История остатков по дням: ID + все даты из отчёта (без «Остаток на сегодня»)
+        (_STOCK_DAILY_SHEET, _prepare_daily_sheet(daily_stock_df)),
     ]
 
     buffer = BytesIO()
