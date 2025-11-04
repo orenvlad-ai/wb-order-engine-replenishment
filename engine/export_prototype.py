@@ -9,6 +9,7 @@ _FULFILLMENT_SHEET = "Остатки Фулфилмент"
 _MIN_STOCK_SHEET = "MinStock"
 _THRESHOLD_SHEET = "Порог загрузки транспорта"
 _ACCEPTANCE_SHEET = "Окна приёмки"
+_STOCK_DAILY_SHEET = "История остатков по дням"
 
 _SALES_STOCK_COLUMNS = [
     "Артикул продавца",
@@ -57,6 +58,17 @@ def build_prototype_workbook(
         (_MIN_STOCK_SHEET, _ensure_columns(min_stock_df, _MIN_STOCK_COLUMNS)),
         (_THRESHOLD_SHEET, _ensure_columns(threshold_df, _THRESHOLD_COLUMNS)),
         (_ACCEPTANCE_SHEET, _ensure_columns(acceptance_df, _ACCEPTANCE_COLUMNS)),
+        # Пустой шаблон для будущих ежедневных остатков (по сети)
+        (
+            _STOCK_DAILY_SHEET,
+            pd.DataFrame(
+                columns=[
+                    "Артикул продавца",
+                    "Артикул WB",
+                    "Остаток на сегодня",
+                ]
+            ),
+        ),
     ]
 
     buffer = BytesIO()
