@@ -3,7 +3,7 @@ from typing import Iterable, Optional
 
 import pandas as pd
 
-_SALES_SHEET = "Продажи и остатки по складам"
+_SALES_SHEET = "Продажи по складам"
 _SUPPLY_SHEET = "Поставки в пути"
 _FULFILLMENT_SHEET = "Остатки Фулфилмент"
 _MIN_STOCK_SHEET = "MinStock"
@@ -15,7 +15,9 @@ _SALES_STOCK_COLUMNS = [
     "Артикул WB",
     "Склад",
     "Заказали, шт",
-    "Остаток на сегодня",
+    "Дней в наличии",
+    "Средние продажи в день",
+    "Коэф. склада",
 ]
 _SUPPLY_COLUMNS = ["Артикул продавца", "Артикул WB", "Склад", "Количество"]
 _FULFILLMENT_COLUMNS = ["Артикул продавца", "Артикул WB", "Количество"]
