@@ -14,11 +14,11 @@
         <label for="files" class="flex flex-col items-center justify-center w-full h-40 border-2 border-dashed rounded-xl text-slate-500 mb-3"
                @dragover.prevent
                @drop.prevent="onDrop($event)">
-          <input type="file" id="files" name="files" multiple class="hidden" accept=".xlsx,.xls,.csv" @change="onPick">
+          <input type="file" id="files" name="files" multiple class="hidden" accept=".xlsx,.csv" @change="onPick">
           <div class="text-center cursor-pointer">
             <div class="text-4xl">⬆️</div>
             <div>Перетащите сюда файлы или нажмите для выбора</div>
-            <div class="text-xs">Поддерживаются .xlsx, .xls, .csv</div>
+            <div class="text-xs">Поддерживаются .xlsx, .csv</div>
           </div>
         </label>
         <div class="mb-4" x-show="files.length">
@@ -90,7 +90,7 @@ function ui(){
       }
     },
     onDrop(ev){
-      const dropped = [...ev.dataTransfer.files].filter(f => /\.(xlsx|xls|csv)$/i.test(f.name));
+      const dropped = [...ev.dataTransfer.files].filter(f => /\.(xlsx|csv)$/i.test(f.name));
       if(dropped.length){ this.addFiles(dropped); }
     },
     remove(idx){ this.files.splice(idx,1); },
