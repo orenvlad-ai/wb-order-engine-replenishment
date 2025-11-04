@@ -23,6 +23,9 @@ from engine.transform import (
 )
 from engine.export_prototype import build_prototype_workbook
 
+# Название листа с продажами в итоговом Excel (для логов)
+SHEET_SALES_NAME = "Продажи по складам"
+
 _SALES_STOCK_COLUMNS = [
     "Артикул продавца",
     "Артикул WB",
@@ -136,9 +139,7 @@ async def build(files: List[UploadFile] = File(...)):
         else:
             sales_stock = pd.DataFrame(columns=_SALES_STOCK_COLUMNS)
 
-        logs.append(
-            f"Итог: «Продажи и остатки по складам» — {len(sales_stock)}."
-        )
+        logs.append(f"Итог: «{SHEET_SALES_NAME}» — {len(sales_stock)}.")
 
         supplies_df = pd.concat(supplies_frames, ignore_index=True) if supplies_frames else None
         fulfillment_df = (
