@@ -76,6 +76,7 @@ async def build(files: List[UploadFile] = File(...)):
     combined_frames: List[pd.DataFrame] = []
     supplies_frames: List[pd.DataFrame] = []
     fulfillment_frames: List[pd.DataFrame] = []
+    daily_frames: List[pd.DataFrame] = []  # История остатков по дням (по сети)
 
     if not files:
         return JSONResponse({"ok": False, "log": "Файлы не переданы"}, status_code=400)
@@ -134,6 +135,22 @@ async def build(files: List[UploadFile] = File(...)):
             logs.append(
                 f"{f.filename}: источник «История остатков» — {len(merged)} строк"
             )
+            # Сбор дневных остатков (по сети) для вкладки «История остатков по дням»
+            if daily is not None and not daily.empty:
+                df = daily.copy()
+                id_cols = ["Артикул продавца", "Артикул WB"]
+                date_cols = [c for c in df.columns if c not in id_cols]
+                if date_cols:
+                    for c in date_cols:
+                        df[c] = pd.to_numeric(
+                            df[c]
+                            .astype(str)
+                            .str.replace("\xa0", "", regex=False)
+                            .str.replace(" ", "", regex=False)
+                            .str.replace(",", ".", regex=False),
+                            errors="coerce",
+                        ).fillna(0)
+                    daily_frames.append(df[id_cols + date_cols])
 
         if combined_frames:
             sales_stock = pd.concat(combined_frames, ignore_index=True).reindex(columns=_SALES_STOCK_COLUMNS)
@@ -141,6 +158,28 @@ async def build(files: List[UploadFile] = File(...)):
             sales_stock = pd.DataFrame(columns=_SALES_STOCK_COLUMNS)
 
         logs.append(f"Итог: «{SHEET_SALES_NAME}» — {len(sales_stock)}.")
+
+        # Свести «Историю остатков по дням» из всех загруженных файлов
+        daily_stock_df = None
+        if daily_frames:
+            base = daily_frames[0]
+            for extra in daily_frames[1:]:
+                base = base.merge(
+                    extra,
+                    on=["Артикул продавца", "Артикул WB"],
+                    how="outer",
+                )
+            id_cols = ["Артикул продавца", "Артикул WB"]
+            non_id = [c for c in base.columns if c not in id_cols]
+            if non_id:
+                daily_stock_df = (
+                    base.groupby(id_cols, dropna=False, as_index=False)[non_id].max()
+                )
+            else:
+                daily_stock_df = base[id_cols].drop_duplicates().reset_index(drop=True)
+            logs.append(
+                f"Итог: «История остатков по дням» — {len(daily_stock_df)} SKU"
+            )
 
         supplies_df = pd.concat(supplies_frames, ignore_index=True) if supplies_frames else None
         fulfillment_df = (
@@ -152,6 +191,7 @@ async def build(files: List[UploadFile] = File(...)):
             sales_stock,
             supplies_df=supplies_df,
             fulfillment_df=fulfillment_df,
+            daily_stock_df=daily_stock_df,
         )
         token = secrets.token_urlsafe(16)
         _memory_artifacts[token] = bio.getvalue()
