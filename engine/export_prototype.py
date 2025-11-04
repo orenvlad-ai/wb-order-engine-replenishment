@@ -66,8 +66,55 @@ def build_prototype_workbook(
     acceptance_df: Optional[pd.DataFrame] = None,
     daily_stock_df: Optional[pd.DataFrame] = None,
 ) -> BytesIO:
+    # ── Расчёты для листа «Продажи по складам» ───────────────────────────────────
+    base_cols = ["Артикул продавца", "Артикул WB", "Склад", "Заказали, шт"]
+    sales_base = _ensure_columns(sales_stock_df, base_cols)
+
+    sku_sum = (
+        sales_base.groupby(
+            ["Артикул продавца", "Артикул WB"], dropna=False, as_index=False
+        )["Заказали, шт"].sum()
+    ).rename(columns={"Заказали, шт": "ΣПродаж"})
+    sales_enriched = sales_base.merge(
+        sku_sum, on=["Артикул продавца", "Артикул WB"], how="left"
+    )
+    sales_enriched["ΣПродаж"] = sales_enriched["ΣПродаж"].fillna(0)
+
+    denom_sum = sales_enriched["ΣПродаж"].replace(0, pd.NA)
+    sales_enriched["Коэф. склада"] = (
+        sales_enriched["Заказали, шт"] / denom_sum
+    ).fillna(0)
+
+    days_df = None
+    if isinstance(daily_stock_df, pd.DataFrame) and not daily_stock_df.empty:
+        id_cols = ["Артикул продавца", "Артикул WB"]
+        date_cols = [c for c in daily_stock_df.columns if c not in id_cols]
+        if date_cols:
+            tmp = daily_stock_df.copy()
+            tmp["Дней в наличии"] = (
+                tmp[date_cols].fillna(0) > 0
+            ).sum(axis=1).astype(int)
+            days_df = tmp[id_cols + ["Дней в наличии"]]
+    if days_df is not None:
+        sales_enriched = sales_enriched.merge(
+            days_df, on=["Артикул продавца", "Артикул WB"], how="left"
+        )
+    else:
+        sales_enriched["Дней в наличии"] = 0
+    sales_enriched["Дней в наличии"] = (
+        sales_enriched["Дней в наличии"].fillna(0).astype(int)
+    )
+
+    denom_days = sales_enriched["Дней в наличии"].replace(0, pd.NA)
+    avg_total_per_day = (sales_enriched["ΣПродаж"] / denom_days).fillna(0)
+    sales_enriched["Средние продажи в день"] = (
+        avg_total_per_day * sales_enriched["Коэф. склада"]
+    ).fillna(0)
+
+    sales_out = _ensure_columns(sales_enriched, _SALES_STOCK_COLUMNS)
+
     sheets = [
-        (_SALES_SHEET, _ensure_columns(sales_stock_df, _SALES_STOCK_COLUMNS)),
+        (_SALES_SHEET, sales_out),
         (_SUPPLY_SHEET, _ensure_columns(supplies_df, _SUPPLY_COLUMNS)),
         (
             _FULFILLMENT_SHEET,
