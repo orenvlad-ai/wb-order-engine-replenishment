@@ -10,6 +10,11 @@ _MIN_STOCK_SHEET = "MinStock"
 _THRESHOLD_SHEET = "Порог загрузки транспорта"
 _ACCEPTANCE_SHEET = "Окна приёмки"
 _STOCK_DAILY_SHEET = "История остатков по дням"
+_STOCK_DAILY_COLUMNS = [
+    "Артикул продавца",
+    "Артикул WB",
+    "Остаток на сегодня",
+]
 
 _SALES_STOCK_COLUMNS = [
     "Артикул продавца",
@@ -47,6 +52,7 @@ def build_prototype_workbook(
     min_stock_df: Optional[pd.DataFrame] = None,
     threshold_df: Optional[pd.DataFrame] = None,
     acceptance_df: Optional[pd.DataFrame] = None,
+    daily_stock_df: Optional[pd.DataFrame] = None,
 ) -> BytesIO:
     sheets = [
         (_SALES_SHEET, _ensure_columns(sales_stock_df, _SALES_STOCK_COLUMNS)),
@@ -61,13 +67,7 @@ def build_prototype_workbook(
         # Пустой шаблон для будущих ежедневных остатков (по сети)
         (
             _STOCK_DAILY_SHEET,
-            pd.DataFrame(
-                columns=[
-                    "Артикул продавца",
-                    "Артикул WB",
-                    "Остаток на сегодня",
-                ]
-            ),
+            _ensure_columns(daily_stock_df, _STOCK_DAILY_COLUMNS),
         ),
     ]
 
