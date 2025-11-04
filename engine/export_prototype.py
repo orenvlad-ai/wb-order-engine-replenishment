@@ -57,6 +57,42 @@ def _prepare_daily_sheet(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     return out[_STOCK_DAILY_ID_COLS + other]
 
 
+def _autofit_sheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) -> None:
+    """
+    Выставляет ширину колонок по максимальной длине значения или заголовка.
+    Работает для xlsxwriter и openpyxl, не выбрасывает ошибки для остальных движков.
+    """
+    if not isinstance(df, pd.DataFrame) or (df.empty and not len(df.columns)):
+        return
+
+    widths = []
+    for column in df.columns:
+        column_title = str(column)
+        try:
+            max_value_length = df[column].astype(str).map(len).max()
+        except Exception:
+            max_value_length = 0
+        widths.append(min(max(len(column_title), max_value_length) + 2, 60))
+
+    try:
+        worksheet = writer.sheets.get(sheet_name)
+        if worksheet is not None and hasattr(worksheet, "set_column"):
+            for idx, width in enumerate(widths):
+                worksheet.set_column(idx, idx, max(8, width))
+            return
+    except Exception:
+        pass
+
+    try:
+        from openpyxl.utils import get_column_letter
+
+        worksheet = writer.book[sheet_name]
+        for idx, width in enumerate(widths, start=1):
+            worksheet.column_dimensions[get_column_letter(idx)].width = max(8, width)
+    except Exception:
+        pass
+
+
 def build_prototype_workbook(
     sales_stock_df: Optional[pd.DataFrame] = None,
     supplies_df: Optional[pd.DataFrame] = None,
@@ -136,6 +172,7 @@ def build_prototype_workbook(
     with writer:
         for sheet_name, dataframe in sheets:
             dataframe.to_excel(writer, sheet_name=sheet_name, index=False)
+            _autofit_sheet(writer, sheet_name, dataframe)
 
     buffer.seek(0)
     return buffer
