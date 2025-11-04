@@ -65,7 +65,13 @@ def _drop_totals(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _to_numeric(series: pd.Series) -> pd.Series:
-    return pd.to_numeric(series.astype(str).str.replace("\xa0", "", regex=False).str.replace(" ", "", regex=False), errors="coerce")
+    prepared = (
+        series.astype(str)
+        .str.replace("\xa0", "", regex=False)
+        .str.replace(" ", "", regex=False)
+        .str.replace(",", ".", regex=False)
+    )
+    return pd.to_numeric(prepared, errors="coerce")
 
 
 def sales_by_warehouse_from_details(df: pd.DataFrame) -> pd.DataFrame:
