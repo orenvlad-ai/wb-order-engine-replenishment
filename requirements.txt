@@ -1,9 +1,7 @@
 fastapi
 uvicorn
-python-multipart
-jinja2
-fastapi
-uvicorn
 jinja2
 python-multipart
+pandas
 openpyxl
+XlsxWriter
