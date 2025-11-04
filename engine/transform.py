@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import re
-from typing import List
+from typing import List, Optional
 
 import pandas as pd
 
@@ -23,7 +25,7 @@ _STOCK_TODAY_ALIASES = [
 ]
 
 
-def _find_column(df: pd.DataFrame, target: str) -> str | None:
+def _find_column(df: pd.DataFrame, target: str) -> Optional[str]:
     normalized = {str(col).strip().lower(): col for col in df.columns}
     return normalized.get(target.strip().lower())
 
@@ -43,7 +45,7 @@ def _prepare_required_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFr
     return pd.DataFrame(prepared)
 
 
-def _find_stock_today_column(df: pd.DataFrame) -> str | None:
+def _find_stock_today_column(df: pd.DataFrame) -> Optional[str]:
     for alias in _STOCK_TODAY_ALIASES:
         column = _find_column(df, alias)
         if column is not None:
@@ -74,7 +76,7 @@ def sales_by_warehouse_from_details(df: pd.DataFrame) -> pd.DataFrame:
     return data.reset_index(drop=True)
 
 
-def _normalize_key(value) -> str | None:
+def _normalize_key(value) -> Optional[str]:
     if pd.isna(value):
         return None
     text = str(value).strip()
@@ -83,8 +85,8 @@ def _normalize_key(value) -> str | None:
 
 def merge_sales_with_stock_today(
     sales_df: pd.DataFrame,
-    detail_df: pd.DataFrame | None,
-    daily_df: pd.DataFrame | None,
+    detail_df: Optional[pd.DataFrame],
+    daily_df: Optional[pd.DataFrame],
 ) -> pd.DataFrame:
     if sales_df is None or sales_df.empty:
         return pd.DataFrame(columns=_SALES_STOCK_COLUMNS)
@@ -158,7 +160,7 @@ def merge_sales_with_stock_today(
 _DATE_PATTERN = re.compile(r"\d{2}\.\d{2}\.\d{4}")
 
 
-def _pick_latest_date_column(df: pd.DataFrame) -> str | None:
+def _pick_latest_date_column(df: pd.DataFrame) -> Optional[str]:
     candidates = []
     for column in df.columns:
         column_str = str(column).strip()
