@@ -5,7 +5,7 @@ import traceback
 from typing import Dict, List
 
 import pandas as pd
-from fastapi import FastAPI, File, UploadFile, Request
+from fastapi import FastAPI, File, UploadFile, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -71,86 +71,119 @@ async def download_fulfillment_template():
     )
 
 @app.post("/build")
-async def build(files: List[UploadFile] = File(...)):
+async def build(
+    files: List[UploadFile] = File(...),
+    dummy: int = Query(0, ge=0, le=1),
+):
     logs: List[str] = []
     combined_frames: List[pd.DataFrame] = []
     supplies_frames: List[pd.DataFrame] = []
     fulfillment_frames: List[pd.DataFrame] = []
     daily_frames: List[pd.DataFrame] = []  # История остатков по дням (по сети)
 
-    if not files:
+    if not files and dummy != 1:
         return JSONResponse({"ok": False, "log": "Файлы не переданы"}, status_code=400)
 
     try:
-        for f in files:
-            raw = await f.read()
-
-            # 1) СНАЧАЛА: «Остатки Фулфилмент» (простой файл с двумя колонками)
-            fulfillment_one = read_fulfillment_stock_file(raw, f.filename)
-            if not fulfillment_one.empty:
-                fulfillment_frames.append(fulfillment_one)
-                logs.append(
-                    f"{f.filename}: источник «Остатки Фулфилмент» — {len(fulfillment_one)} строк"
+        if dummy == 1:
+            logs.append("SMOKE: dummy=1 — сборка на встроенных фикстурах")
+            daily_frames.append(
+                pd.DataFrame(
+                    {
+                        "Артикул продавца": ["DUMMY_SKU"],
+                        "Артикул WB": ["000000"],
+                        "01.10.2025": [10],
+                        "02.10.2025": [12],
+                        "03.10.2025": [0],
+                    }
                 )
-                continue
-
-            # 2) ЗАТЕМ: «Поставки в пути»
-            intransit_df = read_intransit_file(raw, f.filename)
-            if intransit_df.attrs.get("intransit"):
-                supplies_frames.append(intransit_df)
-                logs.append(
-                    f"{f.filename}: источник «Поставки в пути» — {len(intransit_df)} строк"
-                )
-                continue
-
-            # 3) ПОТОМ: «Остатки по складам» (снимок)
-            snapshot_df = read_stock_snapshot(raw, f.filename)
-            if snapshot_df is not None:
-                df_stock = stock_from_snapshot(snapshot_df)
-                if not df_stock.empty:
-                    df_stock = df_stock.rename(columns={"Остаток": "Остаток на сегодня"})
-                    df_stock["Заказали, шт"] = 0
-                    df_stock["Склад"] = df_stock["Склад"].fillna("-").replace("", "-")
-                    df_stock = df_stock[_SALES_STOCK_COLUMNS]
-                    combined_frames.append(df_stock)
-                logs.append(
-                    f"{f.filename}: источник «Остатки по складам» — {len(df_stock)} строк"
-                )
-                continue
-
-            # 4) ИНАЧЕ: «История остатков» (детали + по дням)
-            sheets = read_stock_history(raw, f.filename)
-            if not sheets:
-                logs.append(f"{f.filename}: источник не распознан")
-                continue
-
-            detail = sheets.get("Детальная информация")
-            daily = sheets.get("Остатки по дням")
-
-            df_sales = sales_by_warehouse_from_details(detail) if detail is not None else pd.DataFrame()
-            merged = merge_sales_with_stock_today(df_sales, detail, daily)
+            )
+            detail_dummy = pd.DataFrame(
+                {
+                    "Склад": ["Тула", "Казань"],
+                    "Артикул продавца": ["DUMMY_SKU", "DUMMY_SKU"],
+                    "Артикул WB": ["000000", "000000"],
+                    "Заказали, шт": [8, 4],
+                }
+            )
+            merged = merge_sales_with_stock_today(detail_dummy, detail_dummy, daily_frames[0])
             if not merged.empty:
                 combined_frames.append(merged)
+            logs.append("SMOKE: добавлены фикстуры — продажи и остатки по дням (1 SKU)")
+        else:
+            for f in files:
+                raw = await f.read()
 
-            logs.append(
-                f"{f.filename}: источник «История остатков» — {len(merged)} строк"
-            )
-            # Сбор дневных остатков (по сети) для вкладки «История остатков по дням»
-            if daily is not None and not daily.empty:
-                df = daily.copy()
-                id_cols = ["Артикул продавца", "Артикул WB"]
-                date_cols = [c for c in df.columns if c not in id_cols]
-                if date_cols:
-                    for c in date_cols:
-                        df[c] = pd.to_numeric(
-                            df[c]
-                            .astype(str)
-                            .str.replace("\xa0", "", regex=False)
-                            .str.replace(" ", "", regex=False)
-                            .str.replace(",", ".", regex=False),
-                            errors="coerce",
-                        ).fillna(0)
-                    daily_frames.append(df[id_cols + date_cols])
+                # 1) СНАЧАЛА: «Остатки Фулфилмент» (простой файл с двумя колонками)
+                fulfillment_one = read_fulfillment_stock_file(raw, f.filename)
+                if not fulfillment_one.empty:
+                    fulfillment_frames.append(fulfillment_one)
+                    logs.append(
+                        f"{f.filename}: источник «Остатки Фулфилмент» — {len(fulfillment_one)} строк"
+                    )
+                    continue
+
+                # 2) ЗАТЕМ: «Поставки в пути»
+                intransit_df = read_intransit_file(raw, f.filename)
+                if intransit_df.attrs.get("intransit"):
+                    supplies_frames.append(intransit_df)
+                    logs.append(
+                        f"{f.filename}: источник «Поставки в пути» — {len(intransit_df)} строк"
+                    )
+                    continue
+
+                # 3) ПОТОМ: «Остатки по складам» (снимок)
+                snapshot_df = read_stock_snapshot(raw, f.filename)
+                if snapshot_df is not None:
+                    df_stock = stock_from_snapshot(snapshot_df)
+                    if not df_stock.empty:
+                        df_stock = df_stock.rename(columns={"Остаток": "Остаток на сегодня"})
+                        df_stock["Заказали, шт"] = 0
+                        df_stock["Склад"] = df_stock["Склад"].fillna("-").replace("", "-")
+                        df_stock = df_stock[_SALES_STOCK_COLUMNS]
+                        combined_frames.append(df_stock)
+                    logs.append(
+                        f"{f.filename}: источник «Остатки по складам» — {len(df_stock)} строк"
+                    )
+                    continue
+
+                # 4) ИНАЧЕ: «История остатков» (детали + по дням)
+                sheets = read_stock_history(raw, f.filename)
+                if not sheets:
+                    logs.append(f"{f.filename}: источник не распознан")
+                    continue
+
+                detail = sheets.get("Детальная информация")
+                daily = sheets.get("Остатки по дням")
+
+                df_sales = (
+                    sales_by_warehouse_from_details(detail)
+                    if detail is not None
+                    else pd.DataFrame()
+                )
+                merged = merge_sales_with_stock_today(df_sales, detail, daily)
+                if not merged.empty:
+                    combined_frames.append(merged)
+
+                logs.append(
+                    f"{f.filename}: источник «История остатков» — {len(merged)} строк"
+                )
+                # Сбор дневных остатков (по сети) для вкладки «История остатков по дням»
+                if daily is not None and not daily.empty:
+                    df = daily.copy()
+                    id_cols = ["Артикул продавца", "Артикул WB"]
+                    date_cols = [c for c in df.columns if c not in id_cols]
+                    if date_cols:
+                        for c in date_cols:
+                            df[c] = pd.to_numeric(
+                                df[c]
+                                .astype(str)
+                                .str.replace("\xa0", "", regex=False)
+                                .str.replace(" ", "", regex=False)
+                                .str.replace(",", ".", regex=False),
+                                errors="coerce",
+                            ).fillna(0)
+                        daily_frames.append(df[id_cols + date_cols])
 
         if combined_frames:
             sales_stock = pd.concat(combined_frames, ignore_index=True).reindex(columns=_SALES_STOCK_COLUMNS)
