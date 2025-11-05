@@ -11,6 +11,7 @@ _THRESHOLD_SHEET = "Порог загрузки транспорта"
 _ACCEPTANCE_SHEET = "Окна приёмки"
 _STOCK_DAILY_SHEET = "История остатков по дням"
 _STOCK_DAILY_ID_COLS = ["Артикул продавца", "Артикул WB"]
+MIN_STOCK_DEFAULT = 250
 _STOCK_DAILY_COLUMNS = [
     "Артикул продавца",
     "Артикул WB",
@@ -149,6 +150,18 @@ def build_prototype_workbook(
 
     sales_out = _ensure_columns(sales_enriched, _SALES_STOCK_COLUMNS)
 
+    # ── Авто-MinStock 250 по всем SKU (приоритет у переданного min_stock_df)
+    try:
+        sku_ids = sales_out[["Артикул продавца", "Артикул WB"]].drop_duplicates()
+        min_auto = sku_ids.copy()
+        min_auto["Значение"] = MIN_STOCK_DEFAULT
+    except Exception:
+        min_auto = pd.DataFrame(columns=_MIN_STOCK_COLUMNS)
+    if isinstance(min_stock_df, pd.DataFrame) and not min_stock_df.empty:
+        min_out = _ensure_columns(min_stock_df, _MIN_STOCK_COLUMNS)
+    else:
+        min_out = _ensure_columns(min_auto, _MIN_STOCK_COLUMNS)
+
     sheets = [
         (_SALES_SHEET, sales_out),
         (_SUPPLY_SHEET, _ensure_columns(supplies_df, _SUPPLY_COLUMNS)),
@@ -156,7 +169,7 @@ def build_prototype_workbook(
             _FULFILLMENT_SHEET,
             _ensure_columns(fulfillment_df, _FULFILLMENT_COLUMNS),
         ),
-        (_MIN_STOCK_SHEET, _ensure_columns(min_stock_df, _MIN_STOCK_COLUMNS)),
+        (_MIN_STOCK_SHEET, min_out),
         (_THRESHOLD_SHEET, _ensure_columns(threshold_df, _THRESHOLD_COLUMNS)),
         (_ACCEPTANCE_SHEET, _ensure_columns(acceptance_df, _ACCEPTANCE_COLUMNS)),
         # История остатков по дням: ID + все даты из отчёта (без «Остаток на сегодня»)
