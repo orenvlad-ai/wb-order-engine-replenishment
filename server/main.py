@@ -23,6 +23,7 @@ from engine.transform import (
     stock_from_snapshot,
 )
 from engine.export_prototype import build_prototype_workbook
+import math
 
 # Название листа с продажами в итоговом Excel (для логов)
 SHEET_SALES_NAME = "Продажи по складам"
@@ -254,3 +255,60 @@ async def download(token: str):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="Input_Prototype_Filled.xlsx"'},
     )
+
+# --------------------------- Рекомендации ---------------------------
+@app.post("/recommend")
+async def recommend(files: List[UploadFile] = File(...)):
+    logs: List[str] = []
+    if not files:
+        return JSONResponse({"ok": False, "log": "Файл не передан"}, status_code=400)
+    try:
+        raw = await files[0].read()
+        bio = BytesIO(raw)
+        xls = pd.ExcelFile(bio)
+        # нужен лист «Продажи по складам»
+        sheet_name = None
+        for name in xls.sheet_names:
+            if str(name).strip().lower() == "продажи по складам":
+                sheet_name = name
+                break
+        if sheet_name is None:
+            return JSONResponse({"ok": False, "log": "Не найден лист «Продажи по складам» в загруженном файле"}, status_code=400)
+        df = xls.parse(sheet_name)
+        # нормализуем шапку
+        cols = {str(c).strip().lower(): c for c in df.columns}
+        def pick(cands):
+            for k in cands:
+                if k in cols: return cols[k]
+            return None
+        c_seller = pick(["артикул продавца"])
+        c_wb     = pick(["артикул wb","артикул wb."])
+        c_wh     = pick(["склад"])
+        c_avg    = pick(["средние продажи в день","средние продажи/день","средние продажи"])
+        needed = [c_seller, c_wb, c_wh, c_avg]
+        if any(c is None for c in needed):
+            return JSONResponse({"ok": False, "log": "В листе «Продажи по складам» отсутствуют нужные колонки"}, status_code=400)
+        df_out = pd.DataFrame({
+            "Артикул продавца": df[c_seller],
+            "Артикул WB": df[c_wb],
+            "Склад": df[c_wh],
+            "Средние продажи в день": pd.to_numeric(df[c_avg], errors="coerce").fillna(0.0),
+        })
+        # черновая формула: реком. заказ = ceil(avg_day * 10)
+        df_out["Реком. заказ, шт"] = df_out["Средние продажи в день"].apply(lambda x: int(math.ceil(float(x)*10.0)))
+        # сформировать Excel с рекомендациями
+        out = BytesIO()
+        try:
+            writer = pd.ExcelWriter(out, engine="xlsxwriter")
+        except Exception:
+            writer = pd.ExcelWriter(out, engine="openpyxl")
+        with writer:
+            df_out.to_excel(writer, sheet_name="Рекомендации", index=False)
+        out.seek(0)
+        token = secrets.token_urlsafe(16)
+        _memory_artifacts[token] = out.getvalue()
+        logs.append(f"Рекомендации сформированы: {len(df_out)} строк")
+        return {"ok": True, "log": "\n".join(logs), "download_token": token}
+    except Exception as e:
+        tb = traceback.format_exc()
+        return JSONResponse({"ok": False, "log": "\n".join(logs + [f'Ошибка: {e}', 'TRACEBACK:', tb])}, status_code=500)
