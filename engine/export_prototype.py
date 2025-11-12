@@ -173,6 +173,16 @@ def build_prototype_workbook(
     else:
         min_out = _ensure_columns(min_auto, _MIN_STOCK_COLUMNS)
 
+    # ── Авто «Окна приёмки» (по умолчанию 10 дней, склад — «Все склады») ───────────
+    try:
+        acceptance_auto = pd.DataFrame({"Название склада": ["Все склады"], "Количество дней": [10]})
+    except Exception:
+        acceptance_auto = pd.DataFrame(columns=_ACCEPTANCE_COLUMNS)
+    if isinstance(acceptance_df, pd.DataFrame) and not acceptance_df.empty:
+        acceptance_out = _ensure_columns(acceptance_df, _ACCEPTANCE_COLUMNS)
+    else:
+        acceptance_out = _ensure_columns(acceptance_auto, _ACCEPTANCE_COLUMNS)
+
     # [WB_ANCHOR] sheets = [
     sheets = [
         (_SALES_SHEET, sales_out),
@@ -183,7 +193,7 @@ def build_prototype_workbook(
         ),
         (_MIN_STOCK_SHEET, min_out),
         (_THRESHOLD_SHEET, threshold_out),
-        (_ACCEPTANCE_SHEET, _ensure_columns(acceptance_df, _ACCEPTANCE_COLUMNS)),
+        (_ACCEPTANCE_SHEET, acceptance_out),
         # История остатков по дням: ID + все даты из отчёта (без «Остаток на сегодня»)
         (_STOCK_DAILY_SHEET, _prepare_daily_sheet(daily_stock_df)),
     ]
