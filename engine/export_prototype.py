@@ -150,6 +150,17 @@ def build_prototype_workbook(
 
     sales_out = _ensure_columns(sales_enriched, _SALES_STOCK_COLUMNS)
 
+    # ── Авто-порог загрузки транспорта (по умолчанию 10 000) ───────────────────────
+    try:
+        threshold_auto = pd.DataFrame({"Порог загрузки, шт": [10000]})
+    except Exception:
+        threshold_auto = pd.DataFrame(columns=_THRESHOLD_COLUMNS)
+    if isinstance(threshold_df, pd.DataFrame) and not threshold_df.empty:
+        threshold_src = threshold_df
+    else:
+        threshold_src = threshold_auto
+    threshold_out = _ensure_columns(threshold_src, _THRESHOLD_COLUMNS)
+
     # ── Авто-MinStock 250 по всем SKU (приоритет у переданного min_stock_df)
     try:
         sku_ids = sales_out[["Артикул продавца", "Артикул WB"]].drop_duplicates()
@@ -171,7 +182,7 @@ def build_prototype_workbook(
             _ensure_columns(fulfillment_df, _FULFILLMENT_COLUMNS),
         ),
         (_MIN_STOCK_SHEET, min_out),
-        (_THRESHOLD_SHEET, _ensure_columns(threshold_df, _THRESHOLD_COLUMNS)),
+        (_THRESHOLD_SHEET, threshold_out),
         (_ACCEPTANCE_SHEET, _ensure_columns(acceptance_df, _ACCEPTANCE_COLUMNS)),
         # История остатков по дням: ID + все даты из отчёта (без «Остаток на сегодня»)
         (_STOCK_DAILY_SHEET, _prepare_daily_sheet(daily_stock_df)),
