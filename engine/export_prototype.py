@@ -162,6 +162,7 @@ def build_prototype_workbook(
     else:
         min_out = _ensure_columns(min_auto, _MIN_STOCK_COLUMNS)
 
+    # [WB_ANCHOR] sheets = [
     sheets = [
         (_SALES_SHEET, sales_out),
         (_SUPPLY_SHEET, _ensure_columns(supplies_df, _SUPPLY_COLUMNS)),
