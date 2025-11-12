@@ -42,7 +42,7 @@
           </ul>
         </div>
 
-        <div class="flex gap-3">
+        <div class="flex gap-3 flex-wrap">
           <button type="button"
                   class="px-4 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700"
                   @click="build()">
@@ -50,6 +50,16 @@
           </button>
           <a :class="{'opacity-50 pointer-events-none': !token}" :href="token ? '/download/'+token : '#'"
              class="px-4 py-2 rounded-lg border border-indigo-600 text-indigo-700">Скачать Excel</a>
+
+          <button type="button"
+                  class="px-4 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700"
+                  @click="recommend()">
+            Рассчитать потребности
+          </button>
+          <a :class="{'opacity-50 pointer-events-none': !reco_token}" :href="reco_token ? '/download/'+reco_token : '#'"
+             class="px-4 py-2 rounded-lg border border-slate-400 text-slate-700">
+            Скачать рекомендации
+          </a>
         </div>
 
         <div class="mt-6 border-t pt-4">
@@ -86,6 +96,7 @@ function ui(){
   return {
     files: [],
     token: '',
+    reco_token: '',
     log: '',
     error: '',
     copied: false,
@@ -104,7 +115,7 @@ function ui(){
       this.files = [];
       const input = document.getElementById('files');
       if(input){ input.value=''; }
-      this.token=''; this.log=''; this.error='';
+      this.token=''; this.reco_token=''; this.log=''; this.error='';
     },
     addFiles(list){
       const incoming = Array.from(list);
@@ -125,7 +136,19 @@ function ui(){
       const res = await fetch('/build', { method:'POST', body: fd });
       const data = await res.json().catch(()=>({ok:false,log:'Неверный ответ сервера'}));
       if(!res.ok || !data.ok){ this.error = data.log || 'Ошибка'; return; }
-      this.log = data.log; this.token = data.download_token;
+      this.log = data.log; this.token = data.download_token; this.reco_token='';
+      this.copied = false;
+    },
+    async recommend(){
+      this.error=''; this.reco_token='';
+      if(!this.files.length){ this.error='Загрузите Excel-инпут для расчёта рекомендаций.'; return; }
+      const fd = new FormData();
+      fd.append('files', this.files[0]);
+      const res = await fetch('/recommend', { method:'POST', body: fd });
+      const data = await res.json().catch(()=>({ok:false,log:'Неверный ответ сервера'}));
+      if(!res.ok || !data.ok){ this.error = data.log || 'Ошибка'; return; }
+      this.log = (data.log ? data.log + '\n' : '') + (this.log || '');
+      this.reco_token = data.download_token;
       this.copied = false;
     },
     async copyLog(){
