@@ -285,89 +285,219 @@ async def recommend(files: List[UploadFile] = File(...)):
         df = xls.parse(sheet_name)
         # нормализуем шапку
         cols = {str(c).strip().lower(): c for c in df.columns}
+
         def pick(cands):
             for k in cands:
-                if k in cols: return cols[k]
+                if k in cols:
+                    return cols[k]
             return None
+
         c_seller = pick(["артикул продавца"])
-        c_wb     = pick(["артикул wb","артикул wb."])
-        c_wh     = pick(["склад"])
-        c_avg    = pick(["средние продажи в день","средние продажи/день","средние продажи"])
+        c_wb = pick(["артикул wb", "артикул wb."])
+        c_wh = pick(["склад"])
+        c_avg = pick(["средние продажи в день", "средние продажи/день", "средние продажи"])
         needed = [c_seller, c_wb, c_wh, c_avg]
         if any(c is None for c in needed):
-            return JSONResponse({"ok": False, "log": "В листе «Продажи по складам» отсутствуют нужные колонки"}, status_code=400)
-        df_base = pd.DataFrame({
-            "Артикул продавца": df[c_seller],
-            "Артикул WB": df[c_wb],
-            "Склад": df[c_wh],
-            "Средние продажи в день": pd.to_numeric(df[c_avg], errors="coerce").fillna(0.0),
-        })
-        # черновая заглушка: реком. заказ = ceil(avg_day * 10)
-        df_base["Реком. заказ, шт"] = df_base["Средние продажи в день"].apply(
-            lambda x: int(math.ceil(float(x) * 10.0))
+            return JSONResponse(
+                {"ok": False, "log": "В листе «Продажи по складам» отсутствуют нужные колонки"},
+                status_code=400,
+            )
+        df_base = pd.DataFrame(
+            {
+                "Артикул продавца": df[c_seller],
+                "Артикул WB": df[c_wb],
+                "Склад": df[c_wh],
+                "Средние продажи в день": pd.to_numeric(df[c_avg], errors="coerce").fillna(0.0),
+            }
         )
+        c_stock = pick(["остаток на сегодня", "остаток"])
+        if c_stock is not None:
+            df_base["Остаток на сегодня"] = (
+                pd.to_numeric(df[c_stock], errors="coerce").fillna(0.0)
+            )
+        else:
+            df_base["Остаток на сегодня"] = 0.0
 
-        # Считываем фильтр складов из листа «Склады для подсортировки»
-        selected_wh = None
-        try:
-            wh_sheet_name = None
-            for name in xls.sheet_names:
-                if str(name).strip().lower() == "склады для подсортировки":
-                    wh_sheet_name = name
-                    break
-            if wh_sheet_name is not None:
-                wh_df = xls.parse(wh_sheet_name)
-                wh_cols = {str(c).strip().lower(): c for c in wh_df.columns}
+        # Берём MinStock и MOQ из соответствующих листов
+        # --- MinStock ---
+        minstock_sheet = None
+        for name in xls.sheet_names:
+            if str(name).strip().lower() == "minstock":
+                minstock_sheet = name
+                break
+        minstock_map: Dict[tuple[str, str], float] = {}
+        if minstock_sheet:
+            ms = xls.parse(minstock_sheet)
+            cols_ms = {str(c).strip().lower(): c for c in ms.columns}
+            c_ms_seller = cols_ms.get("артикул продавца")
+            c_ms_wb = cols_ms.get("артикул wb")
+            c_ms_val = cols_ms.get("значение")
+            if c_ms_seller and c_ms_wb and c_ms_val:
+                for _, row in ms.iterrows():
+                    key = (str(row[c_ms_seller]).strip(), str(row[c_ms_wb]).strip())
+                    try:
+                        minstock_map[key] = float(row[c_ms_val])
+                    except Exception:
+                        continue
 
-                def pick_wh(cands):
-                    for k in cands:
-                        if k in wh_cols:
-                            return wh_cols[k]
-                    return None
+        # --- MOQ ---
+        moq_sheet = None
+        for name in xls.sheet_names:
+            if str(name).strip().lower() == "moq":
+                moq_sheet = name
+                break
+        moq_map: Dict[tuple[str, str], float] = {}
+        if moq_sheet:
+            mo = xls.parse(moq_sheet)
+            cols_mo = {str(c).strip().lower(): c for c in mo.columns}
+            c_mo_seller = cols_mo.get("артикул продавца")
+            c_mo_wb = cols_mo.get("артикул wb")
+            c_mo_val = cols_mo.get("moq")
+            if c_mo_seller and c_mo_wb and c_mo_val:
+                for _, row in mo.iterrows():
+                    key = (str(row[c_mo_seller]).strip(), str(row[c_mo_wb]).strip())
+                    try:
+                        moq_map[key] = float(row[c_mo_val])
+                    except Exception:
+                        continue
 
-                c_wh_name = pick_wh(["склад"])
-                c_sel     = pick_wh(["выбрать"])
-                if c_wh_name is not None and c_sel is not None:
-                    tmp_wh = wh_df[[c_wh_name, c_sel]].copy()
+        # --- Окна приёмки ---
+        acceptance_days = 0
+        acc_sheet = None
+        for name in xls.sheet_names:
+            if str(name).strip().lower() == "окна приёмки":
+                acc_sheet = name
+                break
+        if acc_sheet:
+            ac = xls.parse(acc_sheet)
+            cols_ac = {str(c).strip().lower(): c for c in ac.columns}
+            c_days = cols_ac.get("количество дней")
+            if c_days is not None and not ac.empty:
+                try:
+                    acceptance_days = int(ac[c_days].iloc[0])
+                except Exception:
+                    acceptance_days = 0
 
-                    def _is_selected(v) -> bool:
-                        s = str(v).strip().lower()
-                        return s in ("1", "true", "истина", "да", "yes")
+        # --- Фильтр складов + частота подсортировок ---
+        selected_wh: List[str] | None = None
+        freq_map: Dict[str, int] = {}
+        wh_sheet = None
+        for name in xls.sheet_names:
+            if str(name).strip().lower() == "склады для подсортировки":
+                wh_sheet = name
+                break
+        if wh_sheet:
+            wh = xls.parse(wh_sheet)
+            cols_wh = {str(c).strip().lower(): c for c in wh.columns}
+            c_wh_name = cols_wh.get("склад")
+            c_sel = cols_wh.get("выбрать")
+            c_freq = cols_wh.get("частота подсортировок, дни")
 
-                    mask_sel = tmp_wh[c_sel].apply(_is_selected)
-                    selected_wh = sorted(set(tmp_wh.loc[mask_sel, c_wh_name].astype(str)))
-        except Exception:
-            selected_wh = None
-        # сформировать Excel с рекомендациями
+            def _is_selected(v: object) -> bool:
+                return str(v).strip().lower() in ("1", "true", "да", "истина", "yes")
+
+            if c_wh_name and c_sel:
+                selected_wh = []
+                for _, row in wh.iterrows():
+                    wh_name = str(row[c_wh_name]).strip()
+                    if not wh_name:
+                        continue
+                    if _is_selected(row[c_sel]):
+                        selected_wh.append(wh_name)
+                    if c_freq:
+                        try:
+                            freq_map[wh_name] = int(row[c_freq])
+                        except Exception:
+                            freq_map[wh_name] = freq_map.get(wh_name, 0)
+                selected_wh = list(dict.fromkeys(selected_wh))
+
+        if selected_wh:
+            logs.append(
+                f"Фильтр складов: выбрано {len(selected_wh)} — {', '.join(selected_wh)}"
+            )
+        else:
+            logs.append("Фильтр складов: не задан (используются все склады)")
+
+        df_base["Склад"] = df_base["Склад"].astype(str)
+
+        results: Dict[str, pd.DataFrame] = {}
+
+        for wh_name in (selected_wh if selected_wh else [None]):
+            if wh_name is None:
+                subset = df_base.copy()
+            else:
+                subset = df_base[df_base["Склад"] == wh_name].copy()
+            if subset.empty:
+                continue
+
+            rec_rows: List[Dict[str, object]] = []
+            for _, row in subset.iterrows():
+                seller = str(row["Артикул продавца"]).strip()
+                wb = str(row["Артикул WB"]).strip()
+                key = (seller, wb)
+
+                avg = float(row["Средние продажи в день"])
+                stock_now = float(row["Остаток на сегодня"])
+
+                minstock = minstock_map.get(key, 0.0)
+                moq = moq_map.get(key, 0.0)
+                freq = freq_map.get(wh_name or "", 0)
+                horizon = acceptance_days + freq
+
+                target = minstock + avg * horizon
+                order_raw = target - stock_now
+                order = max(0.0, order_raw)
+                if moq > 0:
+                    order = math.ceil(order / moq) * moq
+
+                rec_rows.append(
+                    {
+                        "Артикул продавца": seller,
+                        "Артикул WB": wb,
+                        "Склад": wh_name if wh_name is not None else str(row["Склад"]),
+                        "Средние продажи в день": avg,
+                        "MinStock": minstock,
+                        "Горизонт, дни": horizon,
+                        "MOQ": moq,
+                        "Остаток на сегодня": stock_now,
+                        "Рекомендация, шт": int(order),
+                    }
+                )
+
+            sheet_key = wh_name or "Рекомендации"
+            results[sheet_key] = pd.DataFrame(rec_rows)
+
+        if not results:
+            results["Рекомендации"] = pd.DataFrame(
+                columns=[
+                    "Артикул продавца",
+                    "Артикул WB",
+                    "Склад",
+                    "Средние продажи в день",
+                    "MinStock",
+                    "Горизонт, дни",
+                    "MOQ",
+                    "Остаток на сегодня",
+                    "Рекомендация, шт",
+                ]
+            )
+
         out = BytesIO()
         try:
             writer = pd.ExcelWriter(out, engine="xlsxwriter")
         except Exception:
             writer = pd.ExcelWriter(out, engine="openpyxl")
-        # Очистка имени листа: оставляем русские буквы/цифры/пробелы, режем до 31 символа
-        def _clean_sheet_name(name: str) -> str:
+
+        def _clean(name: str) -> str:
             raw = str(name)
-            # Excel запрещает: : * ? / \ [ ]
-            bad = set(':*?/\\[]')
+            bad = ":*?/\\[]"
             cleaned = "".join(ch for ch in raw if ch not in bad).strip()
-            if not cleaned:
-                cleaned = "Склад"
-            return cleaned[:31]
+            return cleaned[:31] or "Склад"
 
         with writer:
-            if selected_wh:
-                # отдельный лист для каждого выбранного склада
-                logs.append(f"Фильтр складов: выбрано {len(selected_wh)} — {', '.join(selected_wh)}")
-                for wh in selected_wh:
-                    df_wh = df_base[df_base["Склад"].astype(str) == str(wh)]
-                    if df_wh.empty:
-                        continue
-                    sheet_name = _clean_sheet_name(wh)
-                    df_wh.to_excel(writer, sheet_name=sheet_name, index=False)
-            else:
-                # старое поведение: один лист «Рекомендации» по всем складам
-                logs.append("Фильтр складов: не задан (используются все склады)")
-                df_base.to_excel(writer, sheet_name="Рекомендации", index=False)
+            for wh_name, df_wh in results.items():
+                sheet_name = _clean(wh_name)
+                df_wh.to_excel(writer, sheet_name=sheet_name, index=False)
         out.seek(0)
         token = secrets.token_urlsafe(16)
         _memory_artifacts[token] = {
