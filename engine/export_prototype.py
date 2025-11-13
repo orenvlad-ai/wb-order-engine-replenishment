@@ -13,7 +13,12 @@ _STOCK_DAILY_SHEET = "История остатков по дням"
 _STOCK_DAILY_ID_COLS = ["Артикул продавца", "Артикул WB"]
 MIN_STOCK_DEFAULT = 250
 _WAREHOUSE_FILTER_SHEET = "Склады для подсортировки"
-_WAREHOUSE_FILTER_COLUMNS = ["Склад", "Выбрать", "Продано за период, шт"]
+_WAREHOUSE_FILTER_COLUMNS = [
+    "Склад",
+    "Выбрать",
+    "Частота подсортировок, дни",
+    "Продано за период, шт",
+]
 _STOCK_DAILY_COLUMNS = [
     "Артикул продавца",
     "Артикул WB",
@@ -163,9 +168,10 @@ def build_prototype_workbook(
             .rename(columns={"Заказали, шт": "Продано за период, шт"})
         )
         wh_grouped["Выбрать"] = 0
-        wh_df = wh_grouped[["Склад", "Выбрать", "Продано за период, шт"]].sort_values(
-            "Продано за период, шт", ascending=False
-        )
+        wh_grouped["Частота подсортировок, дни"] = 28
+        wh_df = wh_grouped[
+            ["Склад", "Выбрать", "Частота подсортировок, дни", "Продано за период, шт"]
+        ].sort_values("Продано за период, шт", ascending=False)
     except Exception:
         wh_df = pd.DataFrame(columns=_WAREHOUSE_FILTER_COLUMNS)
     warehouse_filter_out = _ensure_columns(wh_df, _WAREHOUSE_FILTER_COLUMNS)
