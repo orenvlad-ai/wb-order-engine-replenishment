@@ -296,29 +296,85 @@ async def recommend(files: List[UploadFile] = File(...)):
         needed = [c_seller, c_wb, c_wh, c_avg]
         if any(c is None for c in needed):
             return JSONResponse({"ok": False, "log": "В листе «Продажи по складам» отсутствуют нужные колонки"}, status_code=400)
-        df_out = pd.DataFrame({
+        df_base = pd.DataFrame({
             "Артикул продавца": df[c_seller],
             "Артикул WB": df[c_wb],
             "Склад": df[c_wh],
             "Средние продажи в день": pd.to_numeric(df[c_avg], errors="coerce").fillna(0.0),
         })
-        # черновая формула: реком. заказ = ceil(avg_day * 10)
-        df_out["Реком. заказ, шт"] = df_out["Средние продажи в день"].apply(lambda x: int(math.ceil(float(x)*10.0)))
+        # черновая заглушка: реком. заказ = ceil(avg_day * 10)
+        df_base["Реком. заказ, шт"] = df_base["Средние продажи в день"].apply(
+            lambda x: int(math.ceil(float(x) * 10.0))
+        )
+
+        # Считываем фильтр складов из листа «Склады для подсортировки»
+        selected_wh = None
+        try:
+            wh_sheet_name = None
+            for name in xls.sheet_names:
+                if str(name).strip().lower() == "склады для подсортировки":
+                    wh_sheet_name = name
+                    break
+            if wh_sheet_name is not None:
+                wh_df = xls.parse(wh_sheet_name)
+                wh_cols = {str(c).strip().lower(): c for c in wh_df.columns}
+
+                def pick_wh(cands):
+                    for k in cands:
+                        if k in wh_cols:
+                            return wh_cols[k]
+                    return None
+
+                c_wh_name = pick_wh(["склад"])
+                c_sel     = pick_wh(["выбрать"])
+                if c_wh_name is not None and c_sel is not None:
+                    tmp_wh = wh_df[[c_wh_name, c_sel]].copy()
+
+                    def _is_selected(v) -> bool:
+                        s = str(v).strip().lower()
+                        return s in ("1", "true", "истина", "да", "yes")
+
+                    mask_sel = tmp_wh[c_sel].apply(_is_selected)
+                    selected_wh = sorted(set(tmp_wh.loc[mask_sel, c_wh_name].astype(str)))
+        except Exception:
+            selected_wh = None
         # сформировать Excel с рекомендациями
         out = BytesIO()
         try:
             writer = pd.ExcelWriter(out, engine="xlsxwriter")
         except Exception:
             writer = pd.ExcelWriter(out, engine="openpyxl")
+        # Очистка имени листа: оставляем русские буквы/цифры/пробелы, режем до 31 символа
+        def _clean_sheet_name(name: str) -> str:
+            raw = str(name)
+            # Excel запрещает: : * ? / \ [ ]
+            bad = set(':*?/\\[]')
+            cleaned = "".join(ch for ch in raw if ch not in bad).strip()
+            if not cleaned:
+                cleaned = "Склад"
+            return cleaned[:31]
+
         with writer:
-            df_out.to_excel(writer, sheet_name="Рекомендации", index=False)
+            if selected_wh:
+                # отдельный лист для каждого выбранного склада
+                logs.append(f"Фильтр складов: выбрано {len(selected_wh)} — {', '.join(selected_wh)}")
+                for wh in selected_wh:
+                    df_wh = df_base[df_base["Склад"].astype(str) == str(wh)]
+                    if df_wh.empty:
+                        continue
+                    sheet_name = _clean_sheet_name(wh)
+                    df_wh.to_excel(writer, sheet_name=sheet_name, index=False)
+            else:
+                # старое поведение: один лист «Рекомендации» по всем складам
+                logs.append("Фильтр складов: не задан (используются все склады)")
+                df_base.to_excel(writer, sheet_name="Рекомендации", index=False)
         out.seek(0)
         token = secrets.token_urlsafe(16)
         _memory_artifacts[token] = {
             "data": out.getvalue(),
             "filename": "WB_Replenishment_Recommendations.xlsx"
         }
-        logs.append(f"Рекомендации сформированы: {len(df_out)} строк")
+        logs.append(f"Рекомендации сформированы: {len(df_base)} строк")
         return {"ok": True, "log": "\n".join(logs), "download_token": token}
     except Exception as e:
         tb = traceback.format_exc()
