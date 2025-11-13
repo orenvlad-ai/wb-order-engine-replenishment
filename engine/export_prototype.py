@@ -19,6 +19,8 @@ _WAREHOUSE_FILTER_COLUMNS = [
     "Частота подсортировок, дни",
     "Продано за период, шт",
 ]
+_MOQ_SHEET = "MOQ"
+_MOQ_COLUMNS = ["Артикул продавца", "Артикул WB", "MOQ"]
 _STOCK_DAILY_COLUMNS = [
     "Артикул продавца",
     "Артикул WB",
@@ -193,11 +195,20 @@ def build_prototype_workbook(
         min_auto = sku_ids.copy()
         min_auto["Значение"] = MIN_STOCK_DEFAULT
     except Exception:
+        sku_ids = pd.DataFrame(columns=_STOCK_DAILY_ID_COLS)
         min_auto = pd.DataFrame(columns=_MIN_STOCK_COLUMNS)
     if isinstance(min_stock_df, pd.DataFrame) and not min_stock_df.empty:
         min_out = _ensure_columns(min_stock_df, _MIN_STOCK_COLUMNS)
     else:
         min_out = _ensure_columns(min_auto, _MIN_STOCK_COLUMNS)
+
+    # ── Вкладка MOQ: по умолчанию MOQ = 250 для каждого SKU ────────────────────────
+    try:
+        moq_auto = sku_ids.copy()
+        moq_auto["MOQ"] = 250
+    except Exception:
+        moq_auto = pd.DataFrame(columns=_MOQ_COLUMNS)
+    moq_out = _ensure_columns(moq_auto, _MOQ_COLUMNS)
 
     # ── Авто «Окна приёмки» (по умолчанию 10 дней, склад — «Все склады») ───────────
     try:
@@ -219,6 +230,7 @@ def build_prototype_workbook(
             _ensure_columns(fulfillment_df, _FULFILLMENT_COLUMNS),
         ),
         (_MIN_STOCK_SHEET, min_out),
+        (_MOQ_SHEET, moq_out),
         (_THRESHOLD_SHEET, threshold_out),
         (_ACCEPTANCE_SHEET, acceptance_out),
         # История остатков по дням: ID + все даты из отчёта (без «Остаток на сегодня»)
