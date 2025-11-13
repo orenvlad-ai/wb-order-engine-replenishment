@@ -494,10 +494,37 @@ async def recommend(files: List[UploadFile] = File(...)):
             cleaned = "".join(ch for ch in raw if ch not in bad).strip()
             return cleaned[:31] or "Склад"
 
+        def _autofit_sheet(writer, sheet_name, df):
+            if df is None or df.empty:
+                return
+            widths = []
+            for col in df.columns:
+                try:
+                    maxlen = max(df[col].astype(str).map(len).max(), len(str(col)))
+                except Exception:
+                    maxlen = len(str(col))
+                widths.append(min(maxlen + 2, 60))
+            try:
+                ws = writer.sheets.get(sheet_name)
+                if ws is not None and hasattr(ws, "set_column"):
+                    for idx, w in enumerate(widths):
+                        ws.set_column(idx, idx, max(8, w))
+                    return
+            except Exception:
+                pass
+            try:
+                from openpyxl.utils import get_column_letter
+                ws = writer.book[sheet_name]
+                for idx, w in enumerate(widths, start=1):
+                    ws.column_dimensions[get_column_letter(idx)].width = max(8, w)
+            except Exception:
+                pass
+
         with writer:
             for wh_name, df_wh in results.items():
                 sheet_name = _clean(wh_name)
                 df_wh.to_excel(writer, sheet_name=sheet_name, index=False)
+                _autofit_sheet(writer, sheet_name, df_wh)
         out.seek(0)
         token = secrets.token_urlsafe(16)
         _memory_artifacts[token] = {
