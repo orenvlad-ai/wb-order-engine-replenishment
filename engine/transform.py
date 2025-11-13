@@ -128,7 +128,7 @@ def merge_sales_with_stock_today(
                 result["Остаток на сегодня"] = result["Остаток на сегодня_detail"]
                 result = result.drop(columns=["Остаток на сегодня_detail"])
 
-    if (not detail_stock_filled) and daily_df is not None and not daily_df.empty:
+    if daily_df is not None and not daily_df.empty:
         latest_column = _pick_latest_date_column(daily_df)
         if latest_column is not None and latest_column in daily_df.columns:
             daily_prepared = _prepare_required_columns(daily_df, ["Артикул продавца", "Артикул WB"])
