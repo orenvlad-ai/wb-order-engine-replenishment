@@ -247,13 +247,21 @@ async def build(
 
 @app.get("/download/{token}")
 async def download(token: str):
-    data = _memory_artifacts.pop(token, None)
-    if not data:
+    blob = _memory_artifacts.pop(token, None)
+    if not blob:
         return JSONResponse({"ok": False, "log": "Файл не найден или срок истёк"}, status_code=404)
+    # Если формат старый (просто bytes) — используем имя по умолчанию.
+    if isinstance(blob, bytes):
+        data = blob
+        filename = "Input_Prototype_Filled.xlsx"
+    else:
+        data = blob.get("data")
+        filename = blob.get("filename", "result.xlsx")
+
     return StreamingResponse(
         BytesIO(data),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="Input_Prototype_Filled.xlsx"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 # --------------------------- Рекомендации ---------------------------
@@ -306,7 +314,10 @@ async def recommend(files: List[UploadFile] = File(...)):
             df_out.to_excel(writer, sheet_name="Рекомендации", index=False)
         out.seek(0)
         token = secrets.token_urlsafe(16)
-        _memory_artifacts[token] = out.getvalue()
+        _memory_artifacts[token] = {
+            "data": out.getvalue(),
+            "filename": "WB_Replenishment_Recommendations.xlsx"
+        }
         logs.append(f"Рекомендации сформированы: {len(df_out)} строк")
         return {"ok": True, "log": "\n".join(logs), "download_token": token}
     except Exception as e:
