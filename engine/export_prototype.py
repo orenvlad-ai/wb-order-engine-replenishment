@@ -12,6 +12,8 @@ _ACCEPTANCE_SHEET = "Окна приёмки"
 _STOCK_DAILY_SHEET = "История остатков по дням"
 _STOCK_DAILY_ID_COLS = ["Артикул продавца", "Артикул WB"]
 MIN_STOCK_DEFAULT = 250
+_WAREHOUSE_FILTER_SHEET = "Склады для подсортировки"
+_WAREHOUSE_FILTER_COLUMNS = ["Склад", "Выбрать"]
 _STOCK_DAILY_COLUMNS = [
     "Артикул продавца",
     "Артикул WB",
@@ -150,6 +152,15 @@ def build_prototype_workbook(
 
     sales_out = _ensure_columns(sales_enriched, _SALES_STOCK_COLUMNS)
 
+    # ── Лист «Склады для подсортировки»: уникальные склады + флаг Выбрать ────────
+    try:
+        wh_df = sales_out[["Склад"]].dropna().drop_duplicates().sort_values("Склад")
+        # по умолчанию не выбрано (FALSE)
+        wh_df["Выбрать"] = False
+    except Exception:
+        wh_df = pd.DataFrame(columns=_WAREHOUSE_FILTER_COLUMNS)
+    warehouse_filter_out = _ensure_columns(wh_df, _WAREHOUSE_FILTER_COLUMNS)
+
     # ── Авто-порог загрузки транспорта (по умолчанию 10 000) ───────────────────────
     try:
         threshold_auto = pd.DataFrame({"Порог загрузки, шт": [10000]})
@@ -194,6 +205,7 @@ def build_prototype_workbook(
         (_MIN_STOCK_SHEET, min_out),
         (_THRESHOLD_SHEET, threshold_out),
         (_ACCEPTANCE_SHEET, acceptance_out),
+        (_WAREHOUSE_FILTER_SHEET, warehouse_filter_out),
         # История остатков по дням: ID + все даты из отчёта (без «Остаток на сегодня»)
         (_STOCK_DAILY_SHEET, _prepare_daily_sheet(daily_stock_df)),
     ]
