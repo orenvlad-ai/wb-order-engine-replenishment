@@ -13,7 +13,7 @@ _STOCK_DAILY_SHEET = "История остатков по дням"
 _STOCK_DAILY_ID_COLS = ["Артикул продавца", "Артикул WB"]
 MIN_STOCK_DEFAULT = 250
 _WAREHOUSE_FILTER_SHEET = "Склады для подсортировки"
-_WAREHOUSE_FILTER_COLUMNS = ["Склад", "Выбрать"]
+_WAREHOUSE_FILTER_COLUMNS = ["Склад", "Выбрать", "Продано за период, шт"]
 _STOCK_DAILY_COLUMNS = [
     "Артикул продавца",
     "Артикул WB",
@@ -152,11 +152,20 @@ def build_prototype_workbook(
 
     sales_out = _ensure_columns(sales_enriched, _SALES_STOCK_COLUMNS)
 
-    # ── Лист «Склады для подсортировки»: уникальные склады + флаг Выбрать ────────
+    # ── Лист «Склады для подсортировки»: уникальные склады + флаг Выбрать + продажи ─
     try:
-        wh_df = sales_out[["Склад"]].dropna().drop_duplicates().sort_values("Склад")
-        # по умолчанию не выбрано (FALSE)
-        wh_df["Выбрать"] = False
+        wh_base = sales_out[["Склад", "Заказали, шт"]].copy()
+        wh_base["Заказали, шт"] = pd.to_numeric(wh_base["Заказали, шт"], errors="coerce").fillna(0)
+        wh_grouped = (
+            wh_base.dropna(subset=["Склад"])
+            .groupby("Склад", as_index=False)["Заказали, шт"]
+            .sum()
+            .rename(columns={"Заказали, шт": "Продано за период, шт"})
+        )
+        wh_grouped["Выбрать"] = 0
+        wh_df = wh_grouped[["Склад", "Выбрать", "Продано за период, шт"]].sort_values(
+            "Продано за период, шт", ascending=False
+        )
     except Exception:
         wh_df = pd.DataFrame(columns=_WAREHOUSE_FILTER_COLUMNS)
     warehouse_filter_out = _ensure_columns(wh_df, _WAREHOUSE_FILTER_COLUMNS)
@@ -196,6 +205,7 @@ def build_prototype_workbook(
 
     # [WB_ANCHOR] sheets = [
     sheets = [
+        (_WAREHOUSE_FILTER_SHEET, warehouse_filter_out),
         (_SALES_SHEET, sales_out),
         (_SUPPLY_SHEET, _ensure_columns(supplies_df, _SUPPLY_COLUMNS)),
         (
@@ -205,7 +215,6 @@ def build_prototype_workbook(
         (_MIN_STOCK_SHEET, min_out),
         (_THRESHOLD_SHEET, threshold_out),
         (_ACCEPTANCE_SHEET, acceptance_out),
-        (_WAREHOUSE_FILTER_SHEET, warehouse_filter_out),
         # История остатков по дням: ID + все даты из отчёта (без «Остаток на сегодня»)
         (_STOCK_DAILY_SHEET, _prepare_daily_sheet(daily_stock_df)),
     ]
