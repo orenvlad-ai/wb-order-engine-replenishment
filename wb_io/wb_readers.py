@@ -1,10 +1,14 @@
 import io
+import logging
 import os
 from typing import Dict, Iterable, List, Optional
 
 import pandas as pd
 from openpyxl import load_workbook
 from zipfile import BadZipFile
+
+
+logger = logging.getLogger(__name__)
 
 
 _DETAIL_REQUIRED = ["Склад", "Артикул продавца", "Артикул WB", "Заказали, шт"]
@@ -451,3 +455,126 @@ def read_fulfillment_stock_file(data: bytes, filename: str) -> pd.DataFrame:
 
     mask = (~result["Артикул продавца"].isna()) & (result["Количество"] > 0)
     return result.loc[mask, ["Артикул продавца", "Количество"]].reset_index(drop=True)
+
+
+def read_sku_reference(raw: bytes, filename: str) -> pd.DataFrame:
+    """Читает справочник SKU и возвращает seller_sku / wb_sku / barcode."""
+
+    empty = pd.DataFrame(columns=["seller_sku", "wb_sku", "barcode"])
+    if not raw:
+        logger.warning("Файл справочника SKU %s пустой", filename or "<неизвестно>")
+        return empty
+
+    try:
+        excel = pd.ExcelFile(io.BytesIO(raw))
+    except Exception:
+        logger.exception("Не удалось открыть файл справочника SKU %s", filename or "<неизвестно>")
+        return empty
+
+    if not excel.sheet_names:
+        logger.warning("В файле справочника SKU %s нет листов", filename or "<неизвестно>")
+        return empty
+
+    best_name = excel.sheet_names[0]
+    best_columns = -1
+    for sheet_name in excel.sheet_names:
+        try:
+            preview = excel.parse(sheet_name, nrows=5)
+        except Exception:
+            logger.warning(
+                "Не удалось прочитать предварительно лист %s в файле %s",
+                sheet_name,
+                filename or "<неизвестно>",
+            )
+            continue
+        columns = preview.shape[1]
+        if best_columns < 0 or columns > best_columns:
+            best_columns = columns
+            best_name = sheet_name
+
+    try:
+        df = excel.parse(best_name)
+    except Exception:
+        logger.exception(
+            "Не удалось прочитать лист %s в файле справочника SKU %s",
+            best_name,
+            filename or "<неизвестно>",
+        )
+        return empty
+
+    df = _clean_dataframe(df)
+    if df.empty:
+        logger.warning(
+            "Лист %s в файле справочника SKU %s пустой",
+            best_name,
+            filename or "<неизвестно>",
+        )
+        return empty
+
+    normalized = {_normalize_header_value(col): col for col in df.columns}
+
+    def _pick(options: Iterable[str]) -> Optional[str]:
+        for option in options:
+            column = normalized.get(option)
+            if column:
+                return column
+        return None
+
+    seller_column = _pick(
+        (
+            "артикул продавца",
+            "артикул поставщика",
+            "seller sku",
+            "sku продавца",
+        )
+    )
+    wb_column = _pick(
+        (
+            "артикул wb",
+            "артикул wildberries",
+            "wb артикул",
+            "wb sku",
+            "артикул вб",
+        )
+    )
+    barcode_column = _pick(
+        (
+            "штрихкод",
+            "штрих-код",
+            "штрих код",
+            "barcode",
+            "баркод",
+        )
+    )
+
+    missing = []
+    if seller_column is None:
+        missing.append("seller_sku")
+    if wb_column is None:
+        missing.append("wb_sku")
+    if barcode_column is None:
+        missing.append("barcode")
+
+    if missing:
+        logger.warning(
+            "В файле справочника SKU %s отсутствуют колонки: %s",
+            filename or "<неизвестно>",
+            ", ".join(missing),
+        )
+        return empty
+
+    def _normalize_value(value: object) -> Optional[str]:
+        if pd.isna(value):
+            return None
+        text = str(value).strip()
+        return text or None
+
+    result = pd.DataFrame(
+        {
+            "seller_sku": df[seller_column].map(_normalize_value),
+            "wb_sku": df[wb_column].map(_normalize_value),
+            "barcode": df[barcode_column].map(_normalize_value),
+        }
+    )
+
+    return result[["seller_sku", "wb_sku", "barcode"]]
