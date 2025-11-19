@@ -16,7 +16,6 @@ from wb_io.wb_readers import (
     read_stock_snapshot,
     read_intransit_file,
     read_fulfillment_stock_file,
-    read_sku_reference,
 )
 from engine.transform import (
     sales_by_warehouse_from_details,
