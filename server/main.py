@@ -16,6 +16,7 @@ from wb_io.wb_readers import (
     read_stock_snapshot,
     read_intransit_file,
     read_fulfillment_stock_file,
+    read_sku_reference,
 )
 from engine.transform import (
     sales_by_warehouse_from_details,
@@ -71,6 +72,7 @@ async def download_fulfillment_template():
         },
     )
 
+# [WB_ANCHOR] build endpoint
 @app.post("/build")
 async def build(
     files: List[UploadFile] = File(...),
@@ -81,6 +83,10 @@ async def build(
     supplies_frames: List[pd.DataFrame] = []
     fulfillment_frames: List[pd.DataFrame] = []
     daily_frames: List[pd.DataFrame] = []  # История остатков по дням (по сети)
+    sku_ref: pd.DataFrame | None = None
+    sku_map: Dict[str, Dict[str, str | None]] = {}
+    unknown_sku: List[str] = []
+    unknown_seen: set[tuple[str, str | None, str | None, str | None]] = set()
 
     if not files and dummy != 1:
         return JSONResponse({"ok": False, "log": "Файлы не переданы"}, status_code=400)
@@ -111,9 +117,25 @@ async def build(
             if not merged.empty:
                 combined_frames.append(merged)
             logs.append("SMOKE: добавлены фикстуры — продажи и остатки по дням (1 SKU)")
+            sku_ref = pd.DataFrame(
+                {"seller_sku": ["DUMMY_SKU"], "wb_sku": ["000000"], "barcode": [None]}
+            )
         else:
             for f in files:
                 raw = await f.read()
+
+                # 0) Справочник SKU
+                sku_candidate: pd.DataFrame | None = None
+                try:
+                    sku_candidate = read_sku_reference(raw, f.filename)
+                except Exception:
+                    sku_candidate = None
+                if sku_candidate is not None and not sku_candidate.empty:
+                    sku_ref = sku_candidate
+                    logs.append(
+                        f"{f.filename}: источник «Справочник SKU» — {len(sku_ref)} строк"
+                    )
+                    continue
 
                 # 1) СНАЧАЛА: «Остатки Фулфилмент» (простой файл с двумя колонками)
                 fulfillment_one = read_fulfillment_stock_file(raw, f.filename)
@@ -185,6 +207,100 @@ async def build(
                                 errors="coerce",
                             ).fillna(0)
                         daily_frames.append(df[id_cols + date_cols])
+
+        # ---- SKU VALIDATION ---------------------------------------------------
+        if sku_ref is None or sku_ref.empty:
+            logs.append("❌ Справочник SKU не найден. Невозможно выполнить валидацию.")
+            return {"ok": False, "log": "\n".join(logs)}
+
+        for _, ref_row in sku_ref.iterrows():
+            seller_value = ref_row.get("seller_sku")
+            wb_value = ref_row.get("wb_sku")
+            barcode_value = ref_row.get("barcode")
+
+            def _normalize_ref(value: object) -> str | None:
+                if pd.isna(value):
+                    return None
+                text = str(value).strip()
+                return text or None
+
+            seller = _normalize_ref(seller_value)
+            wb = _normalize_ref(wb_value)
+            barcode = _normalize_ref(barcode_value)
+            if not (seller or wb or barcode):
+                continue
+            record = {"seller": seller, "wb": wb, "barcode": barcode}
+            for key in (seller, wb, barcode):
+                if key:
+                    sku_map[key] = record
+
+        def _pick_value(row: pd.Series, names: tuple[str, ...]) -> str | None:
+            for name in names:
+                if name in row:
+                    value = row[name]
+                    if pd.isna(value):
+                        continue
+                    text = str(value).strip()
+                    if text:
+                        return text
+            return None
+
+        seller_columns = (
+            "Артикул продавца",
+            "Артикул",
+            "Артикул поставщика",
+        )
+        wb_columns = (
+            "Артикул WB",
+            "Артикул ВБ",
+            "Артикул Wildberries",
+        )
+        barcode_columns = (
+            "Штрихкод",
+            "Штрих-код",
+            "Штрих код",
+            "barcode",
+            "Barcode",
+            "Баркод",
+        )
+
+        def validate_sku(seller: str | None, wb: str | None, barcode: str | None, origin: str) -> None:
+            key_candidates = [seller, wb, barcode]
+            found = None
+            for candidate in key_candidates:
+                if candidate and candidate in sku_map:
+                    found = sku_map[candidate]
+                    break
+            if not found:
+                marker = (origin, seller, wb, barcode)
+                if marker not in unknown_seen:
+                    unknown_seen.add(marker)
+                    unknown_sku.append(
+                        f"{origin}: seller='{seller or ''}', wb='{wb or ''}', barcode='{barcode or ''}'"
+                    )
+
+        validation_sources: List[tuple[pd.DataFrame, str]] = []
+        validation_sources.extend((df, "Продажи и остатки") for df in combined_frames)
+        validation_sources.extend((df, "Остатки Фулфилмент") for df in fulfillment_frames)
+        validation_sources.extend((df, "Поставки в пути") for df in supplies_frames)
+
+        for df_check, origin in validation_sources:
+            if df_check is None or df_check.empty:
+                continue
+            for row_idx, (_, row) in enumerate(df_check.iterrows(), start=1):
+                seller = _pick_value(row, seller_columns)
+                wb = _pick_value(row, wb_columns)
+                barcode = _pick_value(row, barcode_columns)
+                if not (seller or wb or barcode):
+                    continue
+                validate_sku(seller, wb, barcode, f"{origin}, строка {row_idx}")
+
+        if unknown_sku:
+            logs.append("❌ Не удалось валидировать SKU:")
+            logs.extend(unknown_sku)
+            return {"ok": False, "log": "\n".join(logs)}
+
+        logs.append(f"✓ Все SKU валидированы: {len(sku_map)} записей в справочнике.")
 
         if combined_frames:
             sales_stock = pd.concat(combined_frames, ignore_index=True).reindex(columns=_SALES_STOCK_COLUMNS)
