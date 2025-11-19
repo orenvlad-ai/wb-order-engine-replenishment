@@ -1,7 +1,7 @@
 import io
 import logging
 import os
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -459,11 +459,12 @@ def read_fulfillment_stock_file(data: bytes, filename: str) -> pd.DataFrame:
 
 def read_sku_reference(raw: bytes, filename: str) -> pd.DataFrame:
     """Читает справочник SKU и возвращает seller_sku / wb_sku / barcode.
-    v2: поддержка файлов с разделением на два листа («Товары» + «Размеры и Баркоды»).
+    v2 + fallback: поддержка «Общие характеристики одним файлом…».
     """
-    # Новый устойчивый парсер (двухлистовый). Для нерелевантных файлов
-    # возвращает пустой DataFrame, чтобы не путать другие источники.
-    return _read_sku_reference_v2(raw, filename)
+    df = _read_sku_reference_v2(raw, filename) if "_read_sku_reference_v2" in globals() else pd.DataFrame()
+    if df is None or df.empty:
+        df = _read_sku_reference_fallback(raw, filename)
+    return df
 
 
 def _read_sku_reference_v2(raw: bytes, filename: str) -> pd.DataFrame:
@@ -582,5 +583,141 @@ def _read_sku_reference_v2(raw: bytes, filename: str) -> pd.DataFrame:
                     bar["seller_sku"] = df_bar[seller2_col].map(_norm)
                     bar = bar.dropna(subset=["seller_sku", "barcode"]).drop_duplicates(subset=["seller_sku"])
                     base = base.merge(bar[["seller_sku", "barcode"]], on="seller_sku", how="left")
+
+    return base.loc[:, ["seller_sku", "wb_sku", "barcode"]].reset_index(drop=True)
+
+
+def _read_sku_reference_fallback(raw: bytes, filename: str) -> pd.DataFrame:
+    """
+    Fallback‑парсер справочника SKU для книг с произвольными листами/заголовками.
+    Ищет:
+      • лист(ы) с парами: Артикул продавца (seller) и/или Артикул WB (wb);
+      • лист(ы) со штрихкодами (barcode) плюс seller ИЛИ wb.
+    Возвращает DataFrame со столбцами: seller_sku / wb_sku / barcode.
+    Если структура не похожа на справочник — возвращает пустой DataFrame.
+    """
+    empty = pd.DataFrame(columns=["seller_sku", "wb_sku", "barcode"])
+    if not raw:
+        return empty
+    try:
+        xl = pd.ExcelFile(io.BytesIO(raw))
+    except Exception:
+        return empty
+    if not xl.sheet_names:
+        return empty
+
+    seller_opts = (
+        "артикул продавца",
+        "артикул поставщика",
+        "seller sku",
+        "sku продавца",
+        "арт продавца",
+        "supplierarticle",
+        "sellerarticle",
+    )
+    wb_opts = (
+        "артикул wb",
+        "артикул wildberries",
+        "wb артикул",
+        "wb sku",
+        "артикул вб",
+        "код товара",
+        "код номенклатуры",
+        "nmid",
+        "nm id",
+        "nmid товара",
+    )
+    barcode_opts = (
+        "штрихкод",
+        "штрих-код",
+        "штрих код",
+        "barcode",
+        "баркод",
+        "ean",
+        "ean13",
+        "шк товара",
+    )
+
+    def _pick(df: pd.DataFrame, options: tuple[str, ...]) -> Optional[str]:
+        mapping = {_normalize_header_value(c): c for c in df.columns}
+        for key in options:
+            col = mapping.get(key)
+            if col:
+                return col
+        return None
+
+    def _norm(value: object) -> Optional[str]:
+        if pd.isna(value):
+            return None
+        text = str(value).strip()
+        if not text or text.lower() in {"none", "nan"}:
+            return None
+        text = text.replace("\xa0", "").replace(" ", "")
+        if text.endswith(".0") and text[:-2].isdigit():
+            text = text[:-2]
+        return text or None
+
+    seller_candidates: List[Tuple[str, Optional[str], Optional[str]]] = []
+    barcode_candidates: List[Tuple[str, str, Optional[str]]] = []
+    for sheet in xl.sheet_names:
+        try:
+            head = _clean_dataframe(xl.parse(sheet, nrows=50))
+        except Exception:
+            continue
+        if head.empty:
+            continue
+        seller_col = _pick(head, seller_opts)
+        wb_col = _pick(head, wb_opts)
+        barcode_col = _pick(head, barcode_opts)
+        if seller_col or wb_col:
+            seller_candidates.append((sheet, seller_col, wb_col))
+        if barcode_col and (wb_col or seller_col):
+            barcode_candidates.append((sheet, barcode_col, wb_col or seller_col))
+
+    if not seller_candidates:
+        return empty
+
+    sheet, seller_col, wb_col = seller_candidates[0]
+    try:
+        df_seller = _clean_dataframe(xl.parse(sheet))
+    except Exception:
+        return empty
+    base = pd.DataFrame(index=df_seller.index)
+    if seller_col:
+        base["seller_sku"] = df_seller[seller_col].map(_norm)
+    else:
+        base["seller_sku"] = pd.Series([None] * len(df_seller), index=df_seller.index, dtype="object")
+    if wb_col:
+        base["wb_sku"] = df_seller[wb_col].map(_norm)
+    else:
+        base["wb_sku"] = pd.Series([None] * len(df_seller), index=df_seller.index, dtype="object")
+    base = base.dropna(subset=["seller_sku", "wb_sku"], how="all").drop_duplicates()
+    if base.empty:
+        return empty
+
+    base["barcode"] = pd.Series([None] * len(base), index=base.index, dtype="object")
+    if barcode_candidates:
+        sheet_bc, barcode_col, key_col = barcode_candidates[0]
+        try:
+            df_bar = _clean_dataframe(xl.parse(sheet_bc))
+        except Exception:
+            df_bar = pd.DataFrame()
+        if not df_bar.empty and key_col and key_col in df_bar.columns:
+            key_norm = df_bar[key_col].map(_norm)
+            bar = pd.DataFrame({"barcode": df_bar[barcode_col].map(_norm)})
+            bar["key"] = key_norm
+            bar = bar.dropna(subset=["key", "barcode"]).drop_duplicates(subset=["key"])
+            if base["wb_sku"].notna().any():
+                base = base.merge(
+                    bar.rename(columns={"key": "wb_sku"})[["wb_sku", "barcode"]],
+                    on="wb_sku",
+                    how="left",
+                )
+            else:
+                base = base.merge(
+                    bar.rename(columns={"key": "seller_sku"})[["seller_sku", "barcode"]],
+                    on="seller_sku",
+                    how="left",
+                )
 
     return base.loc[:, ["seller_sku", "wb_sku", "barcode"]].reset_index(drop=True)
