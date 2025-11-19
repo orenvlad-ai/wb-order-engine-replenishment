@@ -15,6 +15,10 @@
         <br>• <span class="font-medium">История остатков</span>
         <br>• <span class="font-medium">Остатки Фулфилмент</span> (шаблон ниже)
         <br>• <span class="font-medium">Поставки в пути</span> (отдельный файл по каждому складу)
+        <br>• <span class="font-medium">Справочник SKU</span>
+        <span class="text-slate-500 text-xs">
+          (файл соответствий Артикул продавца ↔ Артикул WB ↔ Штрихкод)
+        </span>
       </p>
       <form @submit.prevent="build()">
         <label for="files" class="flex flex-col items-center justify-center w-full h-40 border-2 border-dashed rounded-xl text-slate-500 mb-3"
