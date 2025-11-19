@@ -475,8 +475,39 @@ def read_sku_reference(raw: bytes, filename: str) -> pd.DataFrame:
         logger.warning("В файле справочника SKU %s нет листов", filename or "<неизвестно>")
         return empty
 
-    best_name = excel.sheet_names[0]
-    best_columns = -1
+    seller_options = (
+        "артикул продавца",
+        "артикул поставщика",
+        "seller sku",
+        "sku продавца",
+    )
+    wb_options = (
+        "артикул wb",
+        "артикул wildberries",
+        "wb артикул",
+        "wb sku",
+        "артикул вб",
+    )
+    barcode_options = (
+        "штрихкод",
+        "штрих-код",
+        "штрих код",
+        "barcode",
+        "баркод",
+        "шк товара",
+    )
+
+    def _pick_column(df: pd.DataFrame, options: Iterable[str]) -> Optional[str]:
+        normalized = {_normalize_header_value(col): col for col in df.columns}
+        for option in options:
+            column = normalized.get(option)
+            if column:
+                return column
+        return None
+
+    seller_sheet: Optional[str] = None
+    barcode_sheet: Optional[str] = None
+
     for sheet_name in excel.sheet_names:
         try:
             preview = excel.parse(sheet_name, nrows=5)
@@ -487,79 +518,54 @@ def read_sku_reference(raw: bytes, filename: str) -> pd.DataFrame:
                 filename or "<неизвестно>",
             )
             continue
-        columns = preview.shape[1]
-        if best_columns < 0 or columns > best_columns:
-            best_columns = columns
-            best_name = sheet_name
+
+        preview = _clean_dataframe(preview)
+        if preview.empty:
+            continue
+
+        seller_col = _pick_column(preview, seller_options)
+        wb_col = _pick_column(preview, wb_options)
+        barcode_col = _pick_column(preview, barcode_options)
+
+        if seller_sheet is None and seller_col and wb_col:
+            seller_sheet = sheet_name
+        if barcode_sheet is None and barcode_col and (wb_col or seller_col):
+            barcode_sheet = sheet_name
+
+        if seller_sheet and barcode_sheet:
+            break
+
+    if seller_sheet is None:
+        seller_sheet = excel.sheet_names[0]
 
     try:
-        df = excel.parse(best_name)
+        df_seller = excel.parse(seller_sheet)
     except Exception:
         logger.exception(
             "Не удалось прочитать лист %s в файле справочника SKU %s",
-            best_name,
+            seller_sheet,
             filename or "<неизвестно>",
         )
         return empty
 
-    df = _clean_dataframe(df)
-    if df.empty:
+    df_seller = _clean_dataframe(df_seller)
+    if df_seller.empty:
         logger.warning(
             "Лист %s в файле справочника SKU %s пустой",
-            best_name,
+            seller_sheet,
             filename or "<неизвестно>",
         )
         return empty
 
-    normalized = {_normalize_header_value(col): col for col in df.columns}
+    seller_col = _pick_column(df_seller, seller_options)
+    wb_col = _pick_column(df_seller, wb_options)
+    seller_missing = seller_col is None
+    wb_missing = wb_col is None
 
-    def _pick(options: Iterable[str]) -> Optional[str]:
-        for option in options:
-            column = normalized.get(option)
-            if column:
-                return column
-        return None
-
-    seller_column = _pick(
-        (
-            "артикул продавца",
-            "артикул поставщика",
-            "seller sku",
-            "sku продавца",
-        )
-    )
-    wb_column = _pick(
-        (
-            "артикул wb",
-            "артикул wildberries",
-            "wb артикул",
-            "wb sku",
-            "артикул вб",
-        )
-    )
-    barcode_column = _pick(
-        (
-            "штрихкод",
-            "штрих-код",
-            "штрих код",
-            "barcode",
-            "баркод",
-        )
-    )
-
-    missing = []
-    if seller_column is None:
-        missing.append("seller_sku")
-    if wb_column is None:
-        missing.append("wb_sku")
-    if barcode_column is None:
-        missing.append("barcode")
-
-    if missing:
+    if seller_missing and wb_missing:
         logger.warning(
-            "В файле справочника SKU %s отсутствуют колонки: %s",
+            "В файле справочника SKU %s отсутствуют колонки с артикулами продавца и WB",
             filename or "<неизвестно>",
-            ", ".join(missing),
         )
         return empty
 
@@ -569,12 +575,65 @@ def read_sku_reference(raw: bytes, filename: str) -> pd.DataFrame:
         text = str(value).strip()
         return text or None
 
-    result = pd.DataFrame(
-        {
-            "seller_sku": df[seller_column].map(_normalize_value),
-            "wb_sku": df[wb_column].map(_normalize_value),
-            "barcode": df[barcode_column].map(_normalize_value),
-        }
-    )
+    base = pd.DataFrame()
+    if seller_col:
+        base["seller_sku"] = df_seller[seller_col].map(_normalize_value)
+    else:
+        base["seller_sku"] = pd.Series([None] * len(df_seller))
+    if wb_col:
+        base["wb_sku"] = df_seller[wb_col].map(_normalize_value)
+    else:
+        base["wb_sku"] = pd.Series([None] * len(df_seller))
 
-    return result[["seller_sku", "wb_sku", "barcode"]]
+    base = base.dropna(subset=["seller_sku", "wb_sku"], how="all").drop_duplicates()
+
+    barcode_source = pd.DataFrame(columns=["seller_sku", "wb_sku", "barcode"])
+    if barcode_sheet:
+        try:
+            df_barcode = excel.parse(barcode_sheet)
+        except Exception:
+            logger.warning(
+                "Не удалось прочитать лист %s в файле %s",
+                barcode_sheet,
+                filename or "<неизвестно>",
+            )
+            df_barcode = pd.DataFrame()
+
+        if not df_barcode.empty:
+            df_barcode = _clean_dataframe(df_barcode)
+            bar_wb_col = _pick_column(df_barcode, wb_options)
+            bar_seller_col = _pick_column(df_barcode, seller_options)
+            bar_barcode_col = _pick_column(df_barcode, barcode_options)
+
+            if bar_barcode_col:
+                barcode_source = pd.DataFrame()
+                if bar_seller_col:
+                    barcode_source["seller_sku"] = df_barcode[bar_seller_col].map(_normalize_value)
+                else:
+                    barcode_source["seller_sku"] = None
+                if bar_wb_col:
+                    barcode_source["wb_sku"] = df_barcode[bar_wb_col].map(_normalize_value)
+                else:
+                    barcode_source["wb_sku"] = None
+                barcode_source["barcode"] = df_barcode[bar_barcode_col].map(_normalize_value)
+                barcode_source = barcode_source.dropna(subset=["barcode"]).drop_duplicates()
+
+    if not barcode_source.empty:
+        if barcode_source["wb_sku"].notna().any():
+            base = base.merge(
+                barcode_source[["wb_sku", "barcode"]],
+                on="wb_sku",
+                how="left",
+            )
+        elif barcode_source["seller_sku"].notna().any():
+            base = base.merge(
+                barcode_source[["seller_sku", "barcode"]],
+                on="seller_sku",
+                how="left",
+            )
+        else:
+            base["barcode"] = None
+    else:
+        base["barcode"] = None
+
+    return base[["seller_sku", "wb_sku", "barcode"]].reset_index(drop=True)
