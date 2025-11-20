@@ -3,6 +3,7 @@ from io import BytesIO
 import secrets
 import traceback
 from typing import Dict, List
+import asyncio
 
 import pandas as pd
 from fastapi import FastAPI, File, UploadFile, Request, Query
@@ -43,6 +44,152 @@ try:
     app.mount("/static", StaticFiles(directory="server/static"), name="static")
 except Exception:
     pass
+
+# ------------------------------ FF helpers (recommend) ------------------------------
+def _ff_norm_id(v):
+    import math
+    if v is None: return None
+    if isinstance(v, float) and math.isnan(v): return None
+    s = str(v).strip().replace("\xa0", "")
+    s = s.replace(" ", "")
+    if s.endswith(".0") and s[:-2].isdigit(): s = s[:-2]
+    return s or None
+
+def _ff_read_sheet(xl, name: str) -> pd.DataFrame:
+    try:
+        df = xl.parse(name)
+        df = df.copy()
+        df.columns = [str(c).strip() for c in df.columns]
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+def _ff_build_index_and_filter(book_bytes: bytes):
+    """
+    Возвращает:
+      ff_by_pair: {(seller, wb) -> qty}, ff_by_seller: {seller -> qty}, ff_by_wb: {wb -> qty},
+      selected_wh: множество выбранных складов,
+      diag: список строк‑диагностики для логов.
+    """
+    from io import BytesIO
+    diag = []
+    ff_by_pair, ff_by_seller, ff_by_wb = {}, {}, {}
+    selected_wh: set[str] = set()
+    if not book_bytes:
+        diag.append("FF: входная книга не прочитана (bytes=0) — квотирование пропущено.")
+        return ff_by_pair, ff_by_seller, ff_by_wb, selected_wh, diag
+    try:
+        xl = pd.ExcelFile(BytesIO(book_bytes))
+    except Exception:
+        diag.append("FF: не удалось открыть входную книгу — квотирование пропущено.")
+        return ff_by_pair, ff_by_seller, ff_by_wb, selected_wh, diag
+    # Остатки ФФ
+    ff = _ff_read_sheet(xl, "Остатки Фулфилмент")
+    if not ff.empty:
+        cols = {str(c).strip().lower(): c for c in ff.columns}
+        s_col = cols.get("артикул продавца") or cols.get("артикул поставщика") or cols.get("артикул")
+        w_col = cols.get("артикул wb") or cols.get("артикул wildberries") or cols.get("артикул вб") or cols.get("код товара")
+        q_col = cols.get("количество") or cols.get("остаток") or cols.get("кол-во") or cols.get("шт")
+        if q_col:
+            tmp = ff.copy()
+            if s_col: tmp[s_col] = tmp[s_col].map(_ff_norm_id)
+            if w_col: tmp[w_col] = tmp[w_col].map(_ff_norm_id)
+            tmp[q_col] = pd.to_numeric(tmp[q_col], errors="coerce").fillna(0).clip(lower=0)
+            total_rows = len(tmp)
+            wb_filled = int(tmp[w_col].notna().sum()) if w_col else 0
+            diag.append(f"FF: строк={total_rows}, WB заполнено={wb_filled}")
+            if s_col and w_col:
+                grp = tmp.groupby([s_col, w_col], dropna=False)[q_col].sum()
+                for (s,w), v in grp.items(): ff_by_pair[(s,w)] = float(v)
+            if s_col:
+                grp = tmp.groupby([s_col], dropna=False)[q_col].sum()
+                for s, v in grp.items(): ff_by_seller[s] = float(v)
+            if w_col:
+                grp = tmp.groupby([w_col], dropna=False)[q_col].sum()
+                for w, v in grp.items(): ff_by_wb[w] = float(v)
+    else:
+        diag.append("FF: лист «Остатки Фулфилмент» пуст — квотирование пропущено.")
+    # Склады для подсортировки
+    flt = _ff_read_sheet(xl, "Склады для подсортировки")
+    if not flt.empty:
+        cols = {str(c).strip().lower(): c for c in flt.columns}
+        wh_col = cols.get("склад")
+        pick_col = cols.get("выбрать")
+        if wh_col and pick_col:
+            selected_wh = set(
+                flt.loc[pd.to_numeric(flt[pick_col], errors="coerce").fillna(0).astype(int) == 1, wh_col].astype(str)
+            )
+            diag.append(f"Фильтр складов: выбрано {len(selected_wh)} — " + ", ".join(sorted(selected_wh))[:200])
+    return ff_by_pair, ff_by_seller, ff_by_wb, selected_wh, diag
+
+def _ff_apply_quota_inplace(df: pd.DataFrame, files: List[UploadFile], logs: List[str]) -> None:
+    """
+    Обновляет df IN‑PLACE: добавляет/пересчитывает колонку «Рекомендация с учётом остатков FF».
+    Сумма по SKU среди выбранных складов не превышает FF.
+    """
+    base_col = "Рекомендация, шт"
+    if df is None or df.empty or base_col not in df.columns:
+        logs.append("FF: не найден DataFrame с колонкой «Рекомендация, шт» — пропуск.")
+        return
+    need_cols = ("Артикул продавца", "Артикул WB", "Склад")
+    for c in need_cols:
+        if c not in df.columns:
+            df["Рекомендация с учётом остатков FF"] = pd.to_numeric(df[base_col], errors="coerce").fillna(0).astype(int)
+            logs.append(f"FF: отсутствует колонка «{c}» в рекомендациях — FF=базовой.")
+            return
+    # Читаем входную книгу надёжно
+    book_bytes: bytes = b""
+    try:
+        f0 = files[0]
+        try:
+            pos = f0.file.tell()
+            f0.file.seek(0)
+            book_bytes = f0.file.read()
+            f0.file.seek(pos)
+        except Exception:
+            book_bytes = asyncio.get_event_loop().run_until_complete(f0.read()) if hasattr(asyncio, "get_event_loop") else b""
+            try:
+                f0.file.seek(0)
+            except Exception:
+                pass
+    except Exception:
+        book_bytes = b""
+    ff_by_pair, ff_by_seller, ff_by_wb, selected_wh, diag = _ff_build_index_and_filter(book_bytes)
+    logs.extend(diag)
+    # Гарантируем наличие столбца
+    if "Рекомендация с учётом остатков FF" not in df.columns:
+        df["Рекомендация с учётом остатков FF"] = pd.to_numeric(df[base_col], errors="coerce").fillna(0).astype(int)
+    limited_cnt = 0
+    matched_pair = matched_seller = matched_wb = 0
+    for (s_raw, w_raw), grp in df.groupby(["Артикул продавца", "Артикул WB"], dropna=False):
+        s = _ff_norm_id(s_raw); w = _ff_norm_id(w_raw)
+        ff_total = ff_by_pair.get((s, w))
+        if ff_total is not None: matched_pair += 1
+        if ff_total is None and w is not None:
+            ff_total = ff_by_wb.get(w); matched_wb += int(ff_total is not None)
+        if ff_total is None and s is not None:
+            ff_total = ff_by_seller.get(s); matched_seller += int(ff_total is not None)
+        idx = grp.index
+        sel = idx if not selected_wh else grp.loc[grp["Склад"].astype(str).isin(selected_wh)].index
+        base = pd.to_numeric(df.loc[sel, base_col], errors="coerce").fillna(0).clip(lower=0)
+        if ff_total is None or float(base.sum()) <= float(ff_total):
+            df.loc[sel, "Рекомендация с учётом остатков FF"] = base.astype(int)
+            continue
+        # квоты по Коэф. склада
+        if "Коэф. склада" in df.columns:
+            coefs = pd.to_numeric(df.loc[sel, "Коэф. склада"], errors="coerce").fillna(0).clip(lower=0)
+        else:
+            coefs = pd.Series(1.0, index=sel, dtype="float64")
+        sum_coef = float(coefs[coefs > 0].sum())
+        if sum_coef <= 0:
+            denom = float(base.sum()) or 1.0
+            quota = float(ff_total) * (base / denom)
+        else:
+            quota = float(ff_total) * (coefs / sum_coef)
+        limited = pd.concat([base, quota], axis=1).min(axis=1).clip(lower=0).astype(int)
+        df.loc[sel, "Рекомендация с учётом остатков FF"] = limited
+        limited_cnt += 1
+    logs.append(f"FF: ограничены SKU={limited_cnt}, match pair={matched_pair}, seller={matched_seller}, wb={matched_wb}")
 
 _memory_artifacts: Dict[str, bytes] = {}
 
@@ -635,6 +782,16 @@ async def recommend(files: List[UploadFile] = File(...)):
 
             sheet_key = wh_name or "Рекомендации"
             results[sheet_key] = pd.DataFrame(rec_rows)
+            results[sheet_key]["Рекомендация, шт"] = (
+                pd.to_numeric(results[sheet_key]["Рекомендация, шт"], errors="coerce")
+                .fillna(0)
+                .astype(int)
+            )
+            # FF‑квотирование: добавляем/пересчитываем «Рекомендация с учётом остатков FF» в том же DataFrame
+            try:
+                _ff_apply_quota_inplace(results[sheet_key], files, logs)
+            except Exception as _e:
+                logs.append(f"FF: ошибка квотирования — {type(_e).__name__}")
 
         if not results:
             results["Рекомендации"] = pd.DataFrame(
@@ -650,164 +807,10 @@ async def recommend(files: List[UploadFile] = File(...)):
                     "Рекомендация, шт",
                 ]
             )
-
-        # ---------------- FF-ограничение рекомендаций (вторая колонка) ----------------
-        # 1) Надёжно читаем байты входной книги (seek → read → seek back)
-        book_bytes: bytes = b""
-        try:
-            f0 = files[0]
             try:
-                pos = f0.file.tell()
-                f0.file.seek(0)
-                book_bytes = f0.file.read()
-                f0.file.seek(pos)
-            except Exception:
-                book_bytes = await f0.read()
-                try:
-                    f0.file.seek(0)
-                except Exception:
-                    pass
-        except Exception:
-            book_bytes = b""
-
-        # 2) Вспомогательные локальные функции (без внешних зависимостей)
-        def _norm_id(v) -> str | None:
-            import math
-            if v is None: return None
-            if isinstance(v, float) and math.isnan(v): return None
-            s = str(v).strip().replace("\xa0", "")
-            s = s.replace(" ", "")
-            if s.endswith(".0") and s[:-2].isdigit(): s = s[:-2]
-            return s or None
-
-        def _read_sheet(xl, name: str) -> pd.DataFrame:
-            try:
-                df = xl.parse(name)
-                df = df.copy()
-                df.columns = [str(c).strip() for c in df.columns]
-                return df
-            except Exception:
-                return pd.DataFrame()
-
-        def _build_ff_index_and_filter(book_bytes: bytes) -> tuple[dict[tuple[str|None,str|None], float], set[str], dict]:
-            """
-            Возвращает:
-              ff_map: {(seller, wb) -> qty}  (возможны None в ключе)
-              selected_wh: множество выбранных складов
-              stats: счётчики для лога {'wb': n, 'seller': n, 'pair': n}
-            """
-            from io import BytesIO
-            stats = {'wb': 0, 'seller': 0, 'pair': 0}
-            ff_map: dict[tuple[str|None,str|None], float] = {}
-            selected_wh: set[str] = set()
-            if not book_bytes:
-                return ff_map, selected_wh, stats
-            try:
-                xl = pd.ExcelFile(BytesIO(book_bytes))
-            except Exception:
-                return ff_map, selected_wh, stats
-            # Остатки Фулфилмент
-            ff = _read_sheet(xl, "Остатки Фулфилмент")
-            if not ff.empty:
-                cols = {str(c).strip().lower(): c for c in ff.columns}
-                s_col = cols.get("артикул продавца") or cols.get("артикул поставщика") or cols.get("артикул")
-                w_col = cols.get("артикул wb") or cols.get("артикул wildberries") or cols.get("артикул вб") or cols.get("код товара")
-                q_col = cols.get("количество") or cols.get("остаток") or cols.get("кол-во") or cols.get("шт")
-                if q_col and (s_col or w_col):
-                    tmp = ff.copy()
-                    if s_col: tmp[s_col] = tmp[s_col].map(_norm_id)
-                    if w_col: tmp[w_col] = tmp[w_col].map(_norm_id)
-                    tmp[q_col] = pd.to_numeric(tmp[q_col], errors="coerce").fillna(0).clip(lower=0)
-                    if s_col and w_col:
-                        grp = tmp.groupby([s_col, w_col], dropna=False)[q_col].sum()
-                        for (s_key, w_key), v in grp.items():
-                            ff_map[(s_key, w_key)] = float(v); stats['pair'] += 1
-                    if w_col:
-                        grp = tmp.groupby([w_col], dropna=False)[q_col].sum()
-                        for w_key, v in grp.items():
-                            ff_map[(None, w_key)] = float(v); stats['wb'] += 1
-                    if s_col:
-                        grp = tmp.groupby([s_col], dropna=False)[q_col].sum()
-                        for s_key, v in grp.items():
-                            ff_map[(s_key, None)] = float(v); stats['seller'] += 1
-            # Фильтр складов
-            flt = _read_sheet(xl, "Склады для подсортировки")
-            if not flt.empty:
-                cols = {str(c).strip().lower(): c for c in flt.columns}
-                wh_col = cols.get("склад")
-                pick_col = cols.get("выбрать")
-                if wh_col and pick_col:
-                    selected_wh = set(
-                        flt.loc[pd.to_numeric(flt[pick_col], errors="coerce").fillna(0).astype(int) == 1, wh_col].astype(str)
-                    )
-            return ff_map, selected_wh, stats
-
-        def _apply_ff_quota_inplace(df: pd.DataFrame, ff_map: dict, selected_wh: set[str]) -> tuple[int,int]:
-            """
-            Обновляет df IN-PLACE: добавляет/пересчитывает «Рекомендация с учётом остатков FF».
-            Возвращает (cnt_limited, cnt_all_sku) для лога.
-            """
-            base_col = "Рекомендация, шт"
-            if df is None or df.empty or base_col not in df.columns:
-                return (0, 0)
-            need_cols = ("Артикул продавца", "Артикул WB", "Склад")
-            if any(c not in df.columns for c in need_cols):
-                # Столбец всё равно создадим (как копию базовой), чтобы не пропадал
-                df["Рекомендация с учётом остатков FF"] = pd.to_numeric(df[base_col], errors="coerce").fillna(0).astype(int)
-                return (0, 0)
-            df["Рекомендация с учётом остатков FF"] = pd.to_numeric(df[base_col], errors="coerce").fillna(0).astype(float)
-            coef_col = "Коэф. склада"
-            cnt_limited, cnt_sku = 0, 0
-            for (s_raw, w_raw), grp in df.groupby(["Артикул продавца", "Артикул WB"], dropna=False):
-                cnt_sku += 1
-                s = _norm_id(s_raw); w = _norm_id(w_raw)
-                ff_total = None
-                # приоритет: (s,w) → (None,w) → (s,None)
-                for key in ((s, w), (None, w), (s, None)):
-                    if key in ff_map:
-                        ff_total = float(ff_map[key]); break
-                idx = grp.index
-                if not selected_wh:
-                    sel = idx
-                else:
-                    sel = grp.loc[grp["Склад"].astype(str).isin(selected_wh)].index
-                base = pd.to_numeric(df.loc[sel, base_col], errors="coerce").fillna(0).clip(lower=0)
-                if ff_total is None or float(base.sum()) <= ff_total:
-                    df.loc[sel, "Рекомендация с учётом остатков FF"] = base.astype(int)
-                else:
-                    cnt_limited += 1
-                    if coef_col in df.columns:
-                        coefs = pd.to_numeric(df.loc[sel, coef_col], errors="coerce").fillna(0).clip(lower=0)
-                    else:
-                        coefs = pd.Series(1.0, index=sel, dtype="float64")
-                    sum_coef = float(coefs[coefs > 0].sum())
-                    if sum_coef <= 0:
-                        denom = float(base.sum()) or 1.0
-                        quota = float(ff_total) * (base / denom)
-                    else:
-                        quota = float(ff_total) * (coefs / sum_coef)
-                    limited = pd.concat([base, quota], axis=1).min(axis=1).clip(lower=0).astype(int)
-                    df.loc[sel, "Рекомендация с учётом остатков FF"] = limited
-            return (cnt_limited, cnt_sku)
-
-        # 3) Строим карту FF и применяем её ко всем подходящим DataFrame’ам в locals()
-        ff_map, selected_wh, stats = _build_ff_index_and_filter(book_bytes)
-        total_limited, total_sku = 0, 0
-        try:
-            for _name, _val in list(locals().items()):
-                if isinstance(_val, pd.DataFrame) and ("Рекомендация, шт" in _val.columns):
-                    limited, cnt = _apply_ff_quota_inplace(_val, ff_map, selected_wh)
-                    total_limited += limited; total_sku += cnt
-        except Exception:
-            pass
-        # Короткий лог‑резюме, чтобы видеть, почему колонка может совпадать с базовой
-        if total_sku == 0:
-            logs.append("ℹ️ FF: не найден DataFrame с колонкой «Рекомендация, шт» — колонка FF добавлена не была.")
-        else:
-            logs.append(f"FF‑сопоставление: пар={stats['pair']}, по WB={stats['wb']}, по seller={stats['seller']}.")
-            logs.append(f"FF‑квотирование: ограничены SKU={total_limited} из {total_sku}.")
-            if stats['pair'] == 0 and stats['wb'] == 0 and stats['seller'] == 0:
-                logs.append("⚠️ FF: в листе «Остатки Фулфилмент» нет WB и seller в пригодном виде — колонка FF=базовой.")
+                _ff_apply_quota_inplace(results["Рекомендации"], files, logs)
+            except Exception as _e:
+                logs.append(f"FF: ошибка квотирования — {type(_e).__name__}")
 
         out = BytesIO()
         try:
