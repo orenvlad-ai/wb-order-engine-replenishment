@@ -483,6 +483,7 @@ async def recommend(files: List[UploadFile] = File(...)):
                         "MOQ": moq,
                         "Остаток на сегодня": stock_now,
                         "Рекомендация, шт": int(order),
+                        "Рекомендация с учётом ФФ": 0,
                     }
                 )
 
@@ -505,6 +506,7 @@ async def recommend(files: List[UploadFile] = File(...)):
                     "MOQ",
                     "Остаток на сегодня",
                     "Рекомендация, шт",
+                    "Рекомендация с учётом ФФ",
                 ]
             )
 
