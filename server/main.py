@@ -48,6 +48,61 @@ _memory_artifacts: Dict[str, bytes] = {}
 
 # (FF‑хелперы удалены как неиспользуемые)
 
+def _distribute_ff_for_sku(df, ff_total: float):
+    """
+    Распределяет ограниченный остаток FF по строкам одного SKU.
+    Ожидаемые колонки в df:
+      - 'Рекомендация, шт'  (теоретический заказ по складу)
+      - 'Вес склада'        (нормированный вес среди выбранных складов)
+      - 'MOQ'               (кратность поставки, шаг округления)
+
+    Возвращает pd.Series той же длины, что df, с количеством
+    для колонки 'Рекомендация с учётом ФФ'.
+    """
+    import pandas as pd  # защищаемся на случай переименований
+
+    if df is None or df.empty:
+        return pd.Series([0] * 0, index=df.index if df is not None else None)
+
+    base = pd.to_numeric(df.get("Рекомендация, шт"), errors="coerce").fillna(0.0)
+    base = base.astype(float).clip(lower=0.0)
+    if ff_total is None or ff_total <= 0:
+        return pd.Series(0, index=df.index, dtype="int64")
+
+    total_base = float(base.sum())
+    if total_base <= 0:
+        return pd.Series(0, index=df.index, dtype="int64")
+
+    # Если ФФ хватает на весь теоретический спрос — возвращаем базовый заказ как есть
+    if ff_total >= total_base:
+        return base.round().astype("int64")
+
+    weights = pd.to_numeric(df.get("Вес склада"), errors="coerce").fillna(0.0)
+    weights = weights.astype(float).clip(lower=0.0)
+    total_w = float(weights.sum())
+    if total_w > 0:
+        shares = weights / total_w
+    else:
+        # fallback: распределяем пропорционально теоретическому спросу
+        shares = base / total_base
+
+    raw = ff_total * shares
+    # не выдаём больше, чем теоретический заказ
+    raw = raw.where(raw <= base, base)
+
+    moq = pd.to_numeric(df.get("MOQ"), errors="coerce").fillna(0.0)
+    rounded = []
+    for qty, step in zip(raw, moq):
+        q = float(qty)
+        s = float(step) if step and step > 0 else 1.0
+        if q <= 0:
+            rounded.append(0.0)
+        else:
+            rounded.append(math.ceil(q / s) * s)
+
+    return pd.Series(rounded, index=df.index).fillna(0.0).astype("int64")
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
