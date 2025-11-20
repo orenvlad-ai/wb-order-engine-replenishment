@@ -35,6 +35,8 @@ _SALES_STOCK_COLUMNS = [
     "Дней в наличии",
     "Средние продажи в день",
     "Коэф. склада",
+    "Остаток на сегодня",
+    "Текущий остаток",
 ]
 _SUPPLY_COLUMNS = ["Артикул продавца", "Артикул WB", "Склад", "Количество"]
 _FULFILLMENT_COLUMNS = ["Артикул продавца", "Артикул WB", "Количество"]
@@ -54,6 +56,25 @@ def _ensure_columns(
         if column not in df.columns:
             df[column] = pd.Series(dtype="object")
     return df.loc[:, list(columns)] if df.size else df.reindex(columns=columns)
+
+
+def _add_current_stock_column(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Гарантирует наличие столбца «Текущий остаток» на листе «Продажи по складам».
+    Значение берётся из «Остаток на сегодня»; если его нет — создаём пустой столбец.
+    Вставляем сразу ПОСЛЕ «Остаток на сегодня», если он присутствует.
+    """
+    out = df.copy()
+    if "Текущий остаток" not in out.columns:
+        if "Остаток на сегодня" in out.columns:
+            try:
+                pos = list(out.columns).index("Остаток на сегодня") + 1
+            except ValueError:
+                pos = len(out.columns)
+            out.insert(pos, "Текущий остаток", out["Остаток на сегодня"])
+        else:
+            out["Текущий остаток"] = pd.Series(dtype="float64")
+    return out
 
 
 def _prepare_daily_sheet(df: Optional[pd.DataFrame]) -> pd.DataFrame:
@@ -113,7 +134,13 @@ def build_prototype_workbook(
     daily_stock_df: Optional[pd.DataFrame] = None,
 ) -> BytesIO:
     # ── Расчёты для листа «Продажи по складам» ───────────────────────────────────
-    base_cols = ["Артикул продавца", "Артикул WB", "Склад", "Заказали, шт"]
+    base_cols = [
+        "Артикул продавца",
+        "Артикул WB",
+        "Склад",
+        "Заказали, шт",
+        "Остаток на сегодня",
+    ]
     sales_base = _ensure_columns(sales_stock_df, base_cols)
 
     sku_sum = (
@@ -220,10 +247,13 @@ def build_prototype_workbook(
     else:
         acceptance_out = _ensure_columns(acceptance_auto, _ACCEPTANCE_COLUMNS)
 
+    # «Продажи по складам»: добавляем «Текущий остаток» как алиас «Остатка на сегодня»
+    sales_sheet_df = _add_current_stock_column(sales_out)
+
     # [WB_ANCHOR] sheets = [
     sheets = [
         (_WAREHOUSE_FILTER_SHEET, warehouse_filter_out),
-        (_SALES_SHEET, sales_out),
+        (_SALES_SHEET, sales_sheet_df),
         (_SUPPLY_SHEET, _ensure_columns(supplies_df, _SUPPLY_COLUMNS)),
         (
             _FULFILLMENT_SHEET,
