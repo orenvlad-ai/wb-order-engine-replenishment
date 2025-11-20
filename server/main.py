@@ -701,6 +701,19 @@ async def recommend(files: List[UploadFile] = File(...)):
                 ]
             )
 
+        # Формируем служебную сводную таблицу по всем листам рекомендаций
+        ff_summary = pd.DataFrame()
+        summary_rows = []
+        for sheet_name, df_wh in results.items():
+            if df_wh is None or df_wh.empty:
+                continue
+            tmp = df_wh.copy()
+            # на всякий случай добавим название листа как метку склада-источника
+            tmp["_Лист"] = sheet_name
+            summary_rows.append(tmp)
+        if summary_rows:
+            ff_summary = pd.concat(summary_rows, ignore_index=True)
+
         out = BytesIO()
         try:
             writer = pd.ExcelWriter(out, engine="xlsxwriter")
@@ -740,10 +753,34 @@ async def recommend(files: List[UploadFile] = File(...)):
                 pass
 
         with writer:
+            # основные листы по складам / сценариям
             for wh_name, df_wh in results.items():
                 sheet_name = _clean(wh_name)
                 df_wh.to_excel(writer, sheet_name=sheet_name, index=False)
                 _autofit_sheet(writer, sheet_name, df_wh)
+
+            # служебная сводка по FF и рекомендациям
+            if not ff_summary.empty:
+                # ограничим служебную вкладку только нужными колонками, если они есть
+                cols = []
+                for name in [
+                    "Артикул продавца",
+                    "Артикул WB",
+                    "Склад",
+                    "Коэф. склада",
+                    "Вес склада",
+                    "Остаток на сегодня",
+                    "Остаток ФФ",
+                    "Рекомендация, шт",
+                    "Рекомендация с учётом ФФ",
+                    "_Лист",
+                ]:
+                    if name in ff_summary.columns:
+                        cols.append(name)
+                ff_sheet = ff_summary[cols] if cols else ff_summary
+                summary_name = _clean("FF_Сводка")
+                ff_sheet.to_excel(writer, sheet_name=summary_name, index=False)
+                _autofit_sheet(writer, summary_name, ff_sheet)
         out.seek(0)
         token = secrets.token_urlsafe(16)
         _memory_artifacts[token] = {
