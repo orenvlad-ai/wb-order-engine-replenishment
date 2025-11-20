@@ -648,10 +648,22 @@ async def recommend(files: List[UploadFile] = File(...)):
                         results[sheet_key]["Вес склада"] = 0.0
             else:
                 results[sheet_key]["Вес склада"] = 0.0
-            # Пока учёт остатков ФФ не реализован — копируем теоретическую рекомендацию
-            # в столбец "Рекомендация с учётом ФФ"
+            # ---- FF-логирование и расчёт FF-рекомендации (пока на этапе логов) ----
+            # Для каждого SKU показываем FF-остаток и теоретический заказ
+            for idx, r in results[sheet_key].iterrows():
+                sku_s = str(r.get("Артикул продавца", "")).strip()
+                sku_w = str(r.get("Артикул WB", "")).strip()
+                ff_key = (sku_s, sku_w)
+                ff_val = float(ff_stock.get(ff_key, 0.0))
+                order_theory = int(r.get("Рекомендация, шт", 0))
+                logs.append(
+                    f"FF: SKU {sku_s}/{sku_w} — ФФ остаток={ff_val}, теоретический заказ={order_theory}"
+                )
+
+            # Пока фактическую FF-рекомендацию не считаем — копируем теоретическую
             if "Рекомендация с учётом ФФ" in results[sheet_key].columns:
-                results[sheet_key]["Рекомендация с учётом ФФ"] = results[sheet_key]["Рекомендация, шт"]
+                results[sheet_key]["Рекомендация с учётом ФФ"] = \
+                    results[sheet_key]["Рекомендация, шт"]
         if not results:
             results["Рекомендации"] = pd.DataFrame(
                 columns=[
