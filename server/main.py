@@ -89,20 +89,27 @@ def _apply_ff_quota(result_df: pd.DataFrame, book_bytes: bytes) -> pd.DataFrame:
     ff_df = _read_sheet(xl, "Остатки Фулфилмент")
     filt_df = _read_sheet(xl, "Склады для подсортировки")
 
-    ff_avail = pd.Series(dtype="float64")
+    ff_by_wb = pd.Series(dtype="float64")
+    ff_by_seller = pd.Series(dtype="float64")
     if not ff_df.empty:
-        cols = {c.lower(): c for c in ff_df.columns}
+        cols = {str(c).strip().lower(): c for c in ff_df.columns}
         s_col = cols.get("артикул продавца")
         w_col = cols.get("артикул wb") or cols.get("артикул вб") or cols.get("артикул wildberries")
         q_col = cols.get("количество") or cols.get("остаток") or cols.get("кол-во") or cols.get("шт")
-        if s_col and w_col and q_col:
-            tmp = ff_df[[s_col, w_col, q_col]].copy()
+        if q_col:
+            tmp = ff_df.copy()
+            for c in (s_col, w_col):
+                if c and c in tmp.columns:
+                    tmp[c] = tmp[c].astype(str).str.strip()
             tmp[q_col] = pd.to_numeric(tmp[q_col], errors="coerce").fillna(0)
-            ff_avail = tmp.groupby([s_col, w_col], dropna=False)[q_col].sum()
+            if w_col and w_col in tmp.columns:
+                ff_by_wb = tmp.groupby(w_col, dropna=False)[q_col].sum()
+            if s_col and s_col in tmp.columns:
+                ff_by_seller = tmp.groupby(s_col, dropna=False)[q_col].sum()
 
     selected_wh: set[str] = set()
     if not filt_df.empty:
-        cols = {c.lower(): c for c in filt_df.columns}
+        cols = {str(c).strip().lower(): c for c in filt_df.columns}
         wh_col = cols.get("склад")
         pick_col = cols.get("выбрать")
         if wh_col and pick_col:
@@ -132,7 +139,19 @@ def _apply_ff_quota(result_df: pd.DataFrame, book_bytes: bytes) -> pd.DataFrame:
                 continue
             theor = pd.to_numeric(out.loc[idx_sel, base_col], errors="coerce").fillna(0).clip(lower=0)
             total_theor = float(theor.sum())
-            ff_total = float(ff_avail.get((seller, wb), float("nan")))
+            seller_key = None if pd.isna(seller) else str(seller).strip()
+            wb_key = None if pd.isna(wb) else str(wb).strip()
+            ff_total = float("nan")
+            if wb_key is not None and not ff_by_wb.empty:
+                try:
+                    ff_total = float(ff_by_wb.get(wb_key))
+                except Exception:
+                    ff_total = float("nan")
+            if (not ff_by_seller.empty) and (math.isnan(ff_total)) and (seller_key is not None):
+                try:
+                    ff_total = float(ff_by_seller.get(seller_key))
+                except Exception:
+                    ff_total = float("nan")
             if math.isnan(ff_total):
                 out.loc[idx_sel, "Рекомендация с учётом остатков FF"] = theor.astype(int)
                 others = idx_all.difference(idx_sel)
@@ -398,7 +417,19 @@ async def recommend(files: List[UploadFile] = File(...)):
     if not files:
         return JSONResponse({"ok": False, "log": "Файл не передан"}, status_code=400)
     try:
-        raw = await files[0].read()
+        raw: bytes = b""
+        f0 = files[0]
+        try:
+            pos = f0.file.tell()
+            f0.file.seek(0)
+            raw = f0.file.read()
+            f0.file.seek(pos)
+        except Exception:
+            raw = await f0.read()
+            try:
+                f0.file.seek(0)
+            except Exception:
+                pass
         bio = BytesIO(raw)
         xls = pd.ExcelFile(bio)
         # нужен лист «Продажи по складам»
