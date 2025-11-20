@@ -19,7 +19,9 @@ _SALES_STOCK_COLUMNS = [
 
 _STOCK_TODAY_ALIASES = [
     "Остатки на текущий день",
+    "Остатки на текущий день, шт",
     "Остаток на текущий день",
+    "Остаток на текущий день, шт",
     "Остатки на сегодня",
     "Остаток на сегодня",
 ]
@@ -115,7 +117,9 @@ def merge_sales_with_stock_today(
         detail_prepared["Склад"] = detail_prepared["Склад"].fillna("-").replace("", "-")
         stock_column = _find_stock_today_column(detail_df)
         if stock_column is not None and stock_column in detail_df.columns:
-            detail_prepared["Остаток на сегодня"] = _to_numeric(detail_df[stock_column]).fillna(0)
+            # Важно: не подставляем 0 здесь — оставляем NaN,
+            # чтобы ниже daily-дата дополнила только отсутствующие значения.
+            detail_prepared["Остаток на сегодня"] = _to_numeric(detail_df[stock_column])
             detail_stock_filled = True
         detail_prepared = _drop_totals(detail_prepared)
         if "Остаток на сегодня" not in detail_prepared.columns:
