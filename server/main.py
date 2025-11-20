@@ -560,12 +560,12 @@ async def recommend(files: List[UploadFile] = File(...)):
         result_df = df_base.copy()
         logs.append(f"Рекомендации сформированы: {len(result_df)} строк")
         # FF отключён: вырезаем постобработку и удаляем столбец FF из результата
+        # FF отключён: удаляем колонку тихо, без логов
         try:
             if "Рекомендация с учётом остатков FF" in result_df.columns:
                 result_df.drop(columns=["Рекомендация с учётом остатков FF"], inplace=True, errors="ignore")
-            logs.append("FF: отключён. Столбец «Рекомендация с учётом остатков FF» удалён.")
-        except Exception as _e:
-            logs.append(f"FF: отключён (ошибка при удалении столбца — {type(_e).__name__}).")
+        except Exception:
+            pass
         return {"ok": True, "log": "\n".join(logs), "download_token": token}
     except Exception as e:
         tb = traceback.format_exc()
