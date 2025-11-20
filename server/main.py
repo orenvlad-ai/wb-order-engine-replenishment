@@ -651,30 +651,131 @@ async def recommend(files: List[UploadFile] = File(...)):
                 ]
             )
 
-        # Добавляем столбец «Рекомендация с учётом остатков FF» с учётом книги.
-        book_bytes: bytes | None = raw if isinstance(raw, (bytes, bytearray)) else None
-        if book_bytes is None and files:
+        # Перед выгрузкой Excel: добавим колонку «Рекомендация с учётом остатков FF».
+        # 1) Надёжно читаем байты входной книги (seek → read → seek back).
+        book_bytes: bytes = b""
+        try:
+            f0 = files[0]
             try:
-                await files[0].seek(0)
-                book_bytes = await files[0].read()
+                pos = f0.file.tell()
+                f0.file.seek(0)
+                book_bytes = f0.file.read()
+                f0.file.seek(pos)
             except Exception:
-                book_bytes = None
-        if results:
-            combined_frames: List[pd.DataFrame] = []
-            for sheet_name, df_wh in results.items():
-                tmp = df_wh.copy()
-                tmp["__sheet_name"] = sheet_name
-                combined_frames.append(tmp)
-            merged_df = pd.concat(combined_frames, ignore_index=True) if combined_frames else pd.DataFrame()
-            if not merged_df.empty or "Рекомендация, шт" in merged_df.columns:
-                _apply_ff_quota_inplace(merged_df, book_bytes or b"")
-                if "__sheet_name" in merged_df.columns:
-                    for sheet_name in list(results.keys()):
-                        results[sheet_name] = merged_df[merged_df["__sheet_name"] == sheet_name] \
-                            .drop(columns=["__sheet_name"], errors="ignore")
+                book_bytes = await f0.read()
+                try:
+                    f0.file.seek(0)
+                except Exception:
+                    pass
+        except Exception:
+            book_bytes = b""
+
+        # 2) Вспомогательные функции (локально внутри recommend, чтобы не зависеть от внешних хелперов)
+        def _norm_id(v) -> str | None:
+            import math
+            if v is None: return None
+            if isinstance(v, float) and math.isnan(v): return None
+            s = str(v).strip().replace("\xa0", "")
+            s = s.replace(" ", "")
+            if s.endswith(".0") and s[:-2].isdigit(): s = s[:-2]
+            return s or None
+
+        def _read_sheet(xl, name: str) -> pd.DataFrame:
+            try:
+                df = xl.parse(name)
+                df = df.copy()
+                df.columns = [str(c).strip() for c in df.columns]
+                return df
+            except Exception:
+                return pd.DataFrame()
+
+        def _build_ff_map_and_selected_wh(book_bytes: bytes) -> tuple[dict[tuple[str|None,str|None], float], set[str]]:
+            """Возвращает (ff_map, selected_wh). ff_map[(seller, wb)] = qty."""
+            ff_map: dict[tuple[str|None,str|None], float] = {}
+            selected: set[str] = set()
+            if not book_bytes:
+                return ff_map, selected
+            try:
+                xl = pd.ExcelFile(BytesIO(book_bytes))
+            except Exception:
+                return ff_map, selected
+            # Остатки ФФ
+            ff = _read_sheet(xl, "Остатки Фулфилмент")
+            if not ff.empty:
+                cols = {c.lower(): c for c in ff.columns}
+                s_col = cols.get("артикул продавца") or cols.get("артикул поставщика") or cols.get("артикул")
+                w_col = cols.get("артикул wb") or cols.get("артикул wildberries") or cols.get("артикул вб") or cols.get("код товара")
+                q_col = cols.get("количество") or cols.get("остаток") or cols.get("кол-во") or cols.get("шт")
+                if q_col and (s_col or w_col):
+                    tmp = ff.copy()
+                    if s_col: tmp[s_col] = tmp[s_col].map(_norm_id)
+                    if w_col: tmp[w_col] = tmp[w_col].map(_norm_id)
+                    qty = pd.to_numeric(tmp[q_col], errors="coerce").fillna(0).clip(lower=0)
+                    if s_col and w_col:
+                        grp = tmp.groupby([s_col, w_col], dropna=False)[q_col].sum()
+                        ff_map.update({(_norm_id(k[0]), _norm_id(k[1])): float(v) for k, v in grp.items()})
+                    elif s_col:
+                        grp = tmp.groupby([s_col], dropna=False)[q_col].sum()
+                        ff_map.update({(_norm_id(k), None): float(v) for k, v in grp.items()})
+                    elif w_col:
+                        grp = tmp.groupby([w_col], dropna=False)[q_col].sum()
+                        ff_map.update({(None, _norm_id(k)): float(v) for k, v in grp.items()})
+            # Фильтр складов
+            flt = _read_sheet(xl, "Склады для подсортировки")
+            if not flt.empty:
+                cols = {c.lower(): c for c in flt.columns}
+                wh_col = cols.get("склад")
+                pick_col = cols.get("выбрать")
+                if wh_col and pick_col:
+                    selected = set(
+                        flt.loc[pd.to_numeric(flt[pick_col], errors="coerce").fillna(0).astype(int) == 1, wh_col].astype(str)
+                    )
+            return ff_map, selected
+
+        def _apply_ff_inplace(df: pd.DataFrame, ff_map: dict, selected_wh: set[str]) -> None:
+            """Обновляет df IN-PLACE: добавляет/пересчитывает колонку «Рекомендация с учётом остатков FF»."""
+            base_col = "Рекомендация, шт"
+            if df is None or df.empty or base_col not in df.columns: return
+            for c in ("Артикул продавца", "Артикул WB", "Склад"):
+                if c not in df.columns: return
+            df["Рекомендация с учётом остатков FF"] = pd.to_numeric(df[base_col], errors="coerce").fillna(0).astype(float)
+            coef_col = "Коэф. склада"
+            for (s_raw, w_raw), grp in df.groupby(["Артикул продавца", "Артикул WB"], dropna=False):
+                s = _norm_id(s_raw); w = _norm_id(w_raw)
+                # берём FF по (s,w), затем по (s,None), затем по (None,w)
+                ff_total = ff_map.get((s, w))
+                if ff_total is None: ff_total = ff_map.get((s, None))
+                if ff_total is None: ff_total = ff_map.get((None, w))
+                idx = grp.index
+                if not selected_wh:
+                    sel = idx
                 else:
-                    for sheet_name in list(results.keys()):
-                        results[sheet_name] = merged_df.copy()
+                    sel = grp.loc[grp["Склад"].astype(str).isin(selected_wh)].index
+                base = pd.to_numeric(df.loc[sel, base_col], errors="coerce").fillna(0).clip(lower=0)
+                if ff_total is None or float(base.sum()) <= float(ff_total):
+                    df.loc[sel, "Рекомендация с учётом остатков FF"] = base.astype(int)
+                else:
+                    if coef_col in df.columns:
+                        coefs = pd.to_numeric(df.loc[sel, coef_col], errors="coerce").fillna(0).clip(lower=0)
+                    else:
+                        coefs = pd.Series(1.0, index=sel, dtype="float64")
+                    sum_coef = float(coefs[coefs > 0].sum())
+                    if sum_coef <= 0:
+                        denom = float(base.sum()) or 1.0
+                        quota = float(ff_total) * (base / denom)
+                    else:
+                        quota = float(ff_total) * (coefs / sum_coef)
+                    limited = pd.concat([base, quota], axis=1).min(axis=1).clip(lower=0).astype(int)
+                    df.loc[sel, "Рекомендация с учётом остатков FF"] = limited
+
+        # 3) Собираем карту FF и применяем к любому DataFrame с базовой колонкой
+        ff_map, selected_wh = _build_ff_map_and_selected_wh(book_bytes)
+        try:
+            for _name, _val in list(locals().items()):
+                if isinstance(_val, pd.DataFrame) and ("Рекомендация, шт" in _val.columns):
+                    _apply_ff_inplace(_val, ff_map, selected_wh)
+        except Exception:
+            pass
 
         out = BytesIO()
         try:
