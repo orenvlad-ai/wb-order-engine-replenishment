@@ -59,7 +59,7 @@ async def download_fulfillment_template():
     workbook = Workbook()
     worksheet = workbook.active
     worksheet.title = "Шаблон"
-    worksheet.append(["Артикул продавца", "Количество"])
+    worksheet.append(["Артикул продавца", "Артикул WB", "Количество"])
 
     buffer = BytesIO()
     workbook.save(buffer)
