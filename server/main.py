@@ -494,6 +494,10 @@ async def recommend(files: List[UploadFile] = File(...)):
                 .fillna(0)
                 .astype(int)
             )
+            # Пока учёт остатков ФФ не реализован — копируем теоретическую рекомендацию
+            # в столбец "Рекомендация с учётом ФФ"
+            if "Рекомендация с учётом ФФ" in results[sheet_key].columns:
+                results[sheet_key]["Рекомендация с учётом ФФ"] = results[sheet_key]["Рекомендация, шт"]
         if not results:
             results["Рекомендации"] = pd.DataFrame(
                 columns=[
