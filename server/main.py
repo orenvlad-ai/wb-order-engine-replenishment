@@ -675,6 +675,8 @@ async def recommend(files: List[UploadFile] = File(...)):
                         )
 
                         if ff_val <= 0:
+                            # Остатка на ФФ нет — рекомендация с учётом ФФ = 0
+                            results[sheet_key].loc[idx, "Рекомендация с учётом ФФ"] = 0
                             continue
 
                         df_sku = results[sheet_key].loc[idx]
