@@ -648,22 +648,38 @@ async def recommend(files: List[UploadFile] = File(...)):
                         results[sheet_key]["Вес склада"] = 0.0
             else:
                 results[sheet_key]["Вес склада"] = 0.0
-            # ---- FF-логирование и расчёт FF-рекомендации (пока на этапе логов) ----
-            # Для каждого SKU показываем FF-остаток и теоретический заказ
-            for idx, r in results[sheet_key].iterrows():
-                sku_s = str(r.get("Артикул продавца", "")).strip()
-                sku_w = str(r.get("Артикул WB", "")).strip()
-                ff_key = (sku_s, sku_w)
-                ff_val = float(ff_stock.get(ff_key, 0.0))
-                order_theory = int(r.get("Рекомендация, шт", 0))
-                logs.append(
-                    f"FF: SKU {sku_s}/{sku_w} — ФФ остаток={ff_val}, теоретический заказ={order_theory}"
-                )
-
-            # Пока фактическую FF-рекомендацию не считаем — копируем теоретическую
+            # ---- FF-логирование и расчёт FF-рекомендации ----
+            # Для каждого SKU в этом листе сначала логируем FF и теоретический заказ,
+            # затем считаем "Рекомендация с учётом ФФ" через _distribute_ff_for_sku.
             if "Рекомендация с учётом ФФ" in results[sheet_key].columns:
                 results[sheet_key]["Рекомендация с учётом ФФ"] = \
                     results[sheet_key]["Рекомендация, шт"]
+
+                if "Артикул продавца" in results[sheet_key].columns and "Артикул WB" in results[sheet_key].columns:
+                    grouped = results[sheet_key].groupby(
+                        ["Артикул продавца", "Артикул WB"],
+                        dropna=False,
+                        as_index=False,
+                        sort=False,
+                    )
+                    for (sku_s, sku_w), group_df in grouped:
+                        idx = group_df.index
+                        try:
+                            ff_val = float(group_df["Остаток ФФ"].iloc[0] or 0.0)
+                        except Exception:
+                            ff_val = 0.0
+
+                        order_theory_sum = int(group_df["Рекомендация, шт"].sum())
+                        logs.append(
+                            f"FF: SKU {sku_s}/{sku_w} — ФФ остаток={ff_val}, теоретический заказ={order_theory_sum}"
+                        )
+
+                        if ff_val <= 0:
+                            continue
+
+                        df_sku = results[sheet_key].loc[idx]
+                        ff_series = _distribute_ff_for_sku(df_sku, ff_val)
+                        results[sheet_key].loc[idx, "Рекомендация с учётом ФФ"] = ff_series
         if not results:
             results["Рекомендации"] = pd.DataFrame(
                 columns=[
