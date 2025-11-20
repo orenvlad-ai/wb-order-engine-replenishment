@@ -481,6 +481,7 @@ async def recommend(files: List[UploadFile] = File(...)):
                         "MinStock": minstock,
                         "Горизонт, дни": horizon,
                         "MOQ": moq,
+                        "Вес склада": 0.0,
                         "Остаток на сегодня": stock_now,
                         "Рекомендация, шт": int(order),
                         "Рекомендация с учётом ФФ": 0,
@@ -494,6 +495,20 @@ async def recommend(files: List[UploadFile] = File(...)):
                 .fillna(0)
                 .astype(int)
             )
+
+            # Расчёт веса склада среди выбранных складов
+            if "Коэф. склада" in results[sheet_key].columns:
+                coeffs = results[sheet_key]["Коэф. склада"].astype(float).fillna(0)
+                if len(results[sheet_key]) == 1:
+                    results[sheet_key]["Вес склада"] = 1.0
+                else:
+                    total = coeffs.sum()
+                    if total > 0:
+                        results[sheet_key]["Вес склада"] = coeffs / total
+                    else:
+                        results[sheet_key]["Вес склада"] = 0.0
+            else:
+                results[sheet_key]["Вес склада"] = 0.0
             # Пока учёт остатков ФФ не реализован — копируем теоретическую рекомендацию
             # в столбец "Рекомендация с учётом ФФ"
             if "Рекомендация с учётом ФФ" in results[sheet_key].columns:
@@ -508,6 +523,7 @@ async def recommend(files: List[UploadFile] = File(...)):
                     "MinStock",
                     "Горизонт, дни",
                     "MOQ",
+                    "Вес склада",
                     "Остаток на сегодня",
                     "Рекомендация, шт",
                     "Рекомендация с учётом ФФ",
