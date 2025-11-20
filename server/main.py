@@ -184,6 +184,17 @@ def _apply_ff_quota(result_df: pd.DataFrame, book_bytes: bytes) -> pd.DataFrame:
         out["Рекомендация с учётом остатков FF"] = out[base_col].fillna(0).astype(int)
     return out
 
+
+def _apply_ff_quota_inplace(df: pd.DataFrame, book_bytes: bytes) -> None:
+    """
+    In-place обновление: рассчитывает колонку «Рекомендация с учётом остатков FF»
+    и записывает её прямо в переданный DataFrame (без копий и присваивания через locals()).
+    """
+    updated = _apply_ff_quota(df, book_bytes)
+    if isinstance(updated, pd.DataFrame) and "Рекомендация с учётом остатков FF" in updated.columns:
+        # переносим рассчитанный столбец в исходный df
+        df["Рекомендация с учётом остатков FF"] = updated["Рекомендация с учётом остатков FF"]
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
@@ -641,7 +652,13 @@ async def recommend(files: List[UploadFile] = File(...)):
             )
 
         # Добавляем столбец «Рекомендация с учётом остатков FF» с учётом книги.
-        raw_bytes = raw if isinstance(raw, (bytes, bytearray)) else b""
+        book_bytes: bytes | None = raw if isinstance(raw, (bytes, bytearray)) else None
+        if book_bytes is None and files:
+            try:
+                await files[0].seek(0)
+                book_bytes = await files[0].read()
+            except Exception:
+                book_bytes = None
         if results:
             combined_frames: List[pd.DataFrame] = []
             for sheet_name, df_wh in results.items():
@@ -650,7 +667,7 @@ async def recommend(files: List[UploadFile] = File(...)):
                 combined_frames.append(tmp)
             merged_df = pd.concat(combined_frames, ignore_index=True) if combined_frames else pd.DataFrame()
             if not merged_df.empty or "Рекомендация, шт" in merged_df.columns:
-                merged_df = _apply_ff_quota(merged_df, raw_bytes)
+                _apply_ff_quota_inplace(merged_df, book_bytes or b"")
                 if "__sheet_name" in merged_df.columns:
                     for sheet_name in list(results.keys()):
                         results[sheet_name] = merged_df[merged_df["__sheet_name"] == sheet_name] \
