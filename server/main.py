@@ -862,6 +862,152 @@ async def recommend(files: List[UploadFile] = File(...)):
             "filename": "WB_Replenishment_Recommendations.xlsx"
         }
         logs.append(f"Рекомендации сформированы: {len(df_base)} строк")
+
+        # ---------------- FF‑ПОСТОБРАБОТКА (групповое квотирование по SKU) ----------------
+        # 1) Надёжно читаем байты входной книги (seek → read → seek back)
+        book_bytes: bytes = b""
+        try:
+            f0 = files[0]
+            try:
+                pos = f0.file.tell()
+                f0.file.seek(0)
+                book_bytes = f0.file.read()
+                f0.file.seek(pos)
+            except Exception:
+                book_bytes = await f0.read()
+                try:
+                    f0.file.seek(0)
+                except Exception:
+                    pass
+        except Exception:
+            book_bytes = b""
+
+        # 2) Хелперы для нормализации и чтения листов
+        def _ff_norm(v) -> str | None:
+            import math
+            if v is None: return None
+            if isinstance(v, float) and math.isnan(v): return None
+            s = str(v).strip().replace("\xa0","")
+            s = s.replace(" ","")
+            if s.endswith(".0") and s[:-2].isdigit(): s = s[:-2]
+            return s or None
+
+        def _ff_read_sheet(xl, name: str) -> pd.DataFrame:
+            try:
+                df = xl.parse(name)
+                df = df.copy()
+                df.columns = [str(c).strip() for c in df.columns]
+                return df
+            except Exception:
+                return pd.DataFrame()
+
+        # 3) Строим карту FF и фильтр складов
+        ff_by_wb: dict[str, float] = {}
+        ff_by_seller: dict[str, float] = {}
+        selected_wh: set[str] = set()
+        try:
+            if book_bytes:
+                xl = pd.ExcelFile(BytesIO(book_bytes))
+                # Остатки ФФ
+                ff = _ff_read_sheet(xl, "Остатки Фулфилмент")
+                if not ff.empty:
+                    lc = {str(c).strip().lower(): c for c in ff.columns}
+                    s_col = lc.get("артикул продавца") or lc.get("артикул поставщика") or lc.get("артикул")
+                    w_col = lc.get("артикул wb") or lc.get("артикул wildberries") or lc.get("артикул вб") or lc.get("код товара")
+                    q_col = lc.get("количество") or lc.get("остаток") or lc.get("кол-во") or lc.get("шт")
+                    if q_col:
+                        tmp = ff.copy()
+                        if s_col: tmp[s_col] = tmp[s_col].map(_ff_norm)
+                        if w_col: tmp[w_col] = tmp[w_col].map(_ff_norm)
+                        tmp[q_col] = pd.to_numeric(tmp[q_col], errors="coerce").fillna(0).clip(lower=0)
+                        if w_col:
+                            for w, v in tmp.groupby([w_col], dropna=False)[q_col].sum().items():
+                                wb_key = _ff_norm(w)
+                                if wb_key: ff_by_wb[wb_key] = float(v)
+                        if s_col:
+                            for s, v in tmp.groupby([s_col], dropna=False)[q_col].sum().items():
+                                s_key = _ff_norm(s)
+                                if s_key: ff_by_seller[s_key] = float(v)
+                # Склады для подсортировки
+                flt = _ff_read_sheet(xl, "Склады для подсортировки")
+                if not flt.empty:
+                    lc = {str(c).strip().lower(): c for c in flt.columns}
+                    wh_col = lc.get("склад")
+                    pick_col = lc.get("выбрать")
+                    if wh_col and pick_col:
+                        selected_wh = set(
+                            flt.loc[pd.to_numeric(flt[pick_col], errors="coerce").fillna(0).astype(int) == 1, wh_col].astype(str)
+                        )
+            # Если фильтр пуст — считаем, что выбраны все склады из рекомендаций
+            if not selected_wh and "Склад" in result_df.columns:
+                selected_wh = set(result_df["Склад"].astype(str))
+        except Exception:
+            pass
+
+        # 4) Применяем квотирование IN‑PLACE к датафрейму рекомендаций
+        try:
+            base_col = "Рекомендация, шт"
+            ff_col   = "Рекомендация с учётом остатков FF"
+            need = {"Артикул продавца","Артикул WB","Склад", base_col}
+            # Определяем целевой DF: сначала пробуем result_df, иначе — ищем по locals()
+            targets = []
+            if "result_df" in locals() and isinstance(result_df, pd.DataFrame) and need.issubset(result_df.columns):
+                targets = [result_df]
+            else:
+                for _n, _v in list(locals()).items():
+                    if isinstance(_v, pd.DataFrame) and need.issubset(_v.columns):
+                        targets.append(_v)
+            for df in targets:
+                # нормализованные ключи для группировки по SKU
+                df["_wb_norm"] = df["Артикул WB"].map(_ff_norm)
+                df["_seller_norm"] = df["Артикул продавца"].map(_ff_norm)
+                # колонка результата — всегда присутствует
+                if ff_col not in df.columns:
+                    df[ff_col] = pd.to_numeric(df[base_col], errors="coerce").fillna(0).astype(float)
+                limited_cnt = 0
+                # группируем по «WB если есть, иначе seller»
+                key_series = df["_wb_norm"].where(df["_wb_norm"].notna() & (df["_wb_norm"]!=""), "S:" + df["_seller_norm"].fillna(""))
+                for key, grp in df.groupby(key_series, dropna=False):
+                    wb_key = key if not str(key).startswith("S:") else None
+                    seller_key = key[2:] if isinstance(key, str) and key.startswith("S:") else None
+                    ff_total = None
+                    if wb_key:    ff_total = ff_by_wb.get(wb_key)
+                    if ff_total is None and seller_key: ff_total = ff_by_seller.get(seller_key)
+                    idx_all = grp.index
+                    idx_sel = idx_all if not selected_wh else grp.loc[grp["Склад"].astype(str).isin(selected_wh)].index
+                    base = pd.to_numeric(df.loc[idx_sel, base_col], errors="coerce").fillna(0).clip(lower=0)
+                    if ff_total is None or float(base.sum()) <= float(ff_total):
+                        df.loc[idx_sel, ff_col] = base.astype(int)
+                    else:
+                        limited_cnt += 1
+                        if "Коэф. склада" in df.columns:
+                            coefs = pd.to_numeric(df.loc[idx_sel, "Коэф. склада"], errors="coerce").fillna(0).clip(lower=0)
+                        else:
+                            coefs = pd.Series(1.0, index=idx_sel, dtype="float64")
+                        sum_coef = float(coefs[coefs > 0].sum())
+                        if sum_coef <= 0:
+                            denom = float(base.sum()) or 1.0
+                            quota = float(ff_total) * (base / denom)
+                        else:
+                            quota = float(ff_total) * (coefs / sum_coef)
+                        limited = pd.concat([base, quota], axis=1).min(axis=1).clip(lower=0).astype(int)
+                        df.loc[idx_sel, ff_col] = limited
+                # чистим служебные колонки и логируем
+                df.drop(columns=[c for c in ["_wb_norm","_seller_norm"] if c in df.columns], inplace=True, errors="ignore")
+                logs.append(f"FF: ограничены SKU (групповое квотирование) — {limited_cnt}")
+            if not targets:
+                logs.append("FF: не найден датафрейм с колонками «Артикул продавца/Артикул WB/Склад/Рекомендация, шт».")
+        except Exception as _e:
+            logs.append(f"⚠️ FF: ошибка постобработки — {type(_e).__name__}")
+
+        # 5) Если используется фиксированный список колонок для выгрузки — добавим наш столбец
+        try:
+            for _n, _v in list(locals()).items():
+                if isinstance(_v, (list, tuple)) and any(isinstance(x, str) for x in _v):
+                    if ("Рекомендация, шт" in _v) and ("Рекомендация с учётом остатков FF" not in _v):
+                        locals()[_n] = list(_v) + ["Рекомендация с учётом остатков FF"]
+        except Exception:
+            pass
         return {"ok": True, "log": "\n".join(logs), "download_token": token}
     except Exception as e:
         tb = traceback.format_exc()
