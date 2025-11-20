@@ -445,6 +445,72 @@ async def recommend(files: List[UploadFile] = File(...)):
         else:
             logs.append("Фильтр складов: не задан (используются все склады)")
 
+        # --- Остатки Фулфилмент ---
+        ff_stock: Dict[tuple[str, str], float] = {}
+
+        def _norm_id(v):
+            if v is None:
+                return None
+            if isinstance(v, float) and math.isnan(v):
+                return None
+            s = str(v).strip().replace("\xa0", "")
+            s = s.replace(" ", "")
+            if s.endswith(".0") and s[:-2].isdigit():
+                s = s[:-2]
+            return s or None
+
+        try:
+            # читаем байты книги надёжно (seek -> read -> seek back)
+            pos0 = await files[0].seek(0)
+            raw = await files[0].read()
+            await files[0].seek(pos0 or 0)
+            xl = pd.ExcelFile(BytesIO(raw))
+            # ищем лист «Остатки Фулфилмент» без учёта регистра/вариаций
+            ff_sheet = None
+            for s in xl.sheet_names:
+                sl = str(s).strip().lower()
+                if sl == "остатки фулфилмент":
+                    ff_sheet = s
+                    break
+            if ff_sheet is None:
+                for s in xl.sheet_names:
+                    sl = str(s).strip().lower()
+                    if "остатк" in sl and "фулф" in sl:
+                        ff_sheet = s
+                        break
+            ff_df = pd.DataFrame()
+            if ff_sheet is not None:
+                ff_df = xl.parse(ff_sheet)
+                ff_df = ff_df.copy()
+                ff_df.columns = [str(c).strip() for c in ff_df.columns]
+                lc = {str(c).strip().lower(): c for c in ff_df.columns}
+                seller_col = lc.get("артикул продавца") or lc.get("артикул поставщика") or lc.get("артикул")
+                wb_col = (
+                    lc.get("артикул wb")
+                    or lc.get("артикул wb.")
+                    or lc.get("артикул вб")
+                    or lc.get("код товара")
+                )
+                qty_col = lc.get("количество") or lc.get("остаток") or lc.get("кол-во") or lc.get("шт")
+                if qty_col:
+                    ff_df[qty_col] = pd.to_numeric(ff_df[qty_col], errors="coerce").fillna(0.0).astype(float)
+                    if seller_col in ff_df.columns:
+                        ff_df[seller_col] = ff_df[seller_col].map(_norm_id)
+                    if wb_col in ff_df.columns:
+                        ff_df[wb_col] = ff_df[wb_col].map(_norm_id)
+                    for _, r in ff_df.iterrows():
+                        s_val = _norm_id(r.get(seller_col)) if seller_col else None
+                        w_val = _norm_id(r.get(wb_col)) if wb_col else None
+                        q_val = float(r.get(qty_col, 0.0) or 0.0)
+                        key = (s_val or "", w_val or "")
+                        ff_stock[key] = ff_stock.get(key, 0.0) + q_val
+            if ff_stock:
+                logs.append(f"Остатки ФФ: прочитано {len(ff_stock)} SKU")
+            else:
+                logs.append("Остатки ФФ: лист не найден, считаем остаток ФФ = 0")
+        except Exception:
+            pass
+
         df_base["Склад"] = df_base["Склад"].astype(str)
 
         results: Dict[str, pd.DataFrame] = {}
@@ -494,6 +560,17 @@ async def recommend(files: List[UploadFile] = File(...)):
                         "Рекомендация с учётом ФФ": 0,
                     }
                 )
+                try:
+                    last_row = rec_rows[-1]
+                    s_key = _norm_id(last_row.get("Артикул продавца"))
+                    w_key = _norm_id(last_row.get("Артикул WB"))
+                    ff_key = (s_key or "", w_key or "")
+                    last_row["Остаток ФФ"] = float(ff_stock.get(ff_key, 0.0))
+                except Exception:
+                    try:
+                        rec_rows[-1]["Остаток ФФ"] = 0.0
+                    except Exception:
+                        pass
 
             sheet_key = wh_name or "Рекомендации"
             results[sheet_key] = pd.DataFrame(rec_rows)
@@ -533,6 +610,7 @@ async def recommend(files: List[UploadFile] = File(...)):
                     "Коэф. склада",
                     "Вес склада",
                     "Остаток на сегодня",
+                    "Остаток ФФ",
                     "Рекомендация, шт",
                     "Рекомендация с учётом ФФ",
                 ]
