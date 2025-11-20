@@ -318,6 +318,7 @@ async def recommend(files: List[UploadFile] = File(...)):
         c_wb = pick(["артикул wb", "артикул wb."])
         c_wh = pick(["склад"])
         c_avg = pick(["средние продажи в день", "средние продажи/день", "средние продажи"])
+        c_coef = pick(["коэф. склада", "коэфф. склада", "коэффициент склада", "коэф", "коэфф"])
         needed = [c_seller, c_wb, c_wh, c_avg]
         if any(c is None for c in needed):
             return JSONResponse(
@@ -332,6 +333,10 @@ async def recommend(files: List[UploadFile] = File(...)):
                 "Средние продажи в день": pd.to_numeric(df[c_avg], errors="coerce").fillna(0.0),
             }
         )
+        if c_coef is not None:
+            df_base["Коэф. склада"] = pd.to_numeric(df[c_coef], errors="coerce").fillna(0.0)
+        else:
+            df_base["Коэф. склада"] = 0.0
         c_stock = pick(["остаток на сегодня", "остаток"])
         if c_stock is not None:
             df_base["Остаток на сегодня"] = (
@@ -460,6 +465,7 @@ async def recommend(files: List[UploadFile] = File(...)):
 
                 avg = float(row["Средние продажи в день"])
                 stock_now = float(row["Остаток на сегодня"])
+                coef = float(row.get("Коэф. склада", 0.0))
 
                 minstock = minstock_map.get(key, 0.0)
                 moq = moq_map.get(key, 0.0)
@@ -481,6 +487,7 @@ async def recommend(files: List[UploadFile] = File(...)):
                         "MinStock": minstock,
                         "Горизонт, дни": horizon,
                         "MOQ": moq,
+                        "Коэф. склада": coef,
                         "Вес склада": 0.0,
                         "Остаток на сегодня": stock_now,
                         "Рекомендация, шт": int(order),
@@ -523,6 +530,7 @@ async def recommend(files: List[UploadFile] = File(...)):
                     "MinStock",
                     "Горизонт, дни",
                     "MOQ",
+                    "Коэф. склада",
                     "Вес склада",
                     "Остаток на сегодня",
                     "Рекомендация, шт",
