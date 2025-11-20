@@ -388,8 +388,9 @@ def read_fulfillment_stock_file(data: bytes, filename: str) -> pd.DataFrame:
     Парсит файл остатков Фулфилмента.
     Ожидаемые колонки (любой из синонимов):
       - Артикул продавца: ["артикул продавца", "артикул поставщика", "артикул"]
+      - Артикул WB (опционально): ["артикул wb", "артикул wb.", "артикул вб", "код товара"]
       - Количество:       ["количество", "остаток", "кол-во", "шт"]
-    Возвращает DataFrame с колонками ["Артикул продавца", "Количество"].
+    Возвращает DataFrame с колонками ["Артикул продавца", "Артикул WB", "Количество"].
     """
 
     df = pd.DataFrame()
@@ -422,7 +423,7 @@ def read_fulfillment_stock_file(data: bytes, filename: str) -> pd.DataFrame:
                 continue
 
     if df.empty:
-        return pd.DataFrame(columns=["Артикул продавца", "Количество"])
+        return pd.DataFrame(columns=["Артикул продавца", "Артикул WB", "Количество"])
 
     normalized = {str(column).strip().lower(): column for column in df.columns}
 
@@ -433,13 +434,15 @@ def read_fulfillment_stock_file(data: bytes, filename: str) -> pd.DataFrame:
         return None
 
     seller_column = _pick_column(["артикул продавца", "артикул поставщика", "артикул"])
+    wb_column = _pick_column(["артикул wb", "артикул wb.", "артикул вб", "код товара"])
     quantity_column = _pick_column(["количество", "остаток", "кол-во", "шт"])
 
     if seller_column is None or quantity_column is None:
-        return pd.DataFrame(columns=["Артикул продавца", "Количество"])
+        return pd.DataFrame(columns=["Артикул продавца", "Артикул WB", "Количество"])
 
     result = pd.DataFrame()
     result["Артикул продавца"] = df[seller_column]
+    result["Артикул WB"] = df[wb_column] if wb_column in df.columns else None
     result["Количество"] = (
         pd.to_numeric(
             df[quantity_column]
@@ -454,7 +457,7 @@ def read_fulfillment_stock_file(data: bytes, filename: str) -> pd.DataFrame:
     )
 
     mask = (~result["Артикул продавца"].isna()) & (result["Количество"] > 0)
-    return result.loc[mask, ["Артикул продавца", "Количество"]].reset_index(drop=True)
+    return result.loc[mask, ["Артикул продавца", "Артикул WB", "Количество"]].reset_index(drop=True)
 
 
 def read_sku_reference(raw: bytes, filename: str) -> pd.DataFrame:
