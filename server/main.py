@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from openpyxl import Workbook
+import math
 
 from wb_io.wb_readers import (
     read_stock_history,
@@ -23,7 +24,6 @@ from engine.transform import (
     stock_from_snapshot,
 )
 from engine.export_prototype import build_prototype_workbook
-import math
 
 # Название листа с продажами в итоговом Excel (для логов)
 SHEET_SALES_NAME = "Продажи по складам"
@@ -45,6 +45,125 @@ except Exception:
     pass
 
 _memory_artifacts: Dict[str, bytes] = {}
+
+# ----------------------------- helpers (recommend) -----------------------------
+# Нормализация заголовков и безопасное чтение листа как DataFrame.
+def _read_sheet(xl: pd.ExcelFile, sheet: str) -> pd.DataFrame:
+    try:
+        df = xl.parse(sheet)
+    except Exception:
+        return pd.DataFrame()
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    out.columns = [str(c).strip() for c in out.columns]
+    return out
+
+
+# Квотирование рекомендаций по доступному FF‑остатку.
+def _apply_ff_quota(result_df: pd.DataFrame, book_bytes: bytes) -> pd.DataFrame:
+    """
+    Добавляет колонку 'Рекомендация с учётом остатков FF' на основе:
+      – 'Рекомендация, шт' (уже посчитана базовой логикой),
+      – листа 'Остатки Фулфилмент' (Артикул продавца | Артикул WB | Количество),
+      – и фильтра складов 'Склады для подсортировки' (Выбрать = 1).
+    Алгоритм:
+      1) агрегируем FF по (seller, wb);
+      2) берём строки result_df только по выбранным складам;
+      3) если суммарная теоретическая рекомендация <= FF, оставляем как есть;
+      4) иначе распределяем FF пропорционально 'Коэф. склада' (только > 0),
+         по формуле quota = FF * coef / sum_coef; затем min(theor, quota).
+      5) целочисленное округление вниз (int).
+    """
+    base_col = "Рекомендация, шт"
+    if result_df is None or base_col not in result_df.columns:
+        return result_df
+
+    try:
+        xl = pd.ExcelFile(BytesIO(book_bytes))
+    except Exception:
+        out = result_df.copy()
+        out["Рекомендация с учётом остатков FF"] = pd.to_numeric(out[base_col], errors="coerce").fillna(0).astype(int)
+        return out
+
+    ff_df = _read_sheet(xl, "Остатки Фулфилмент")
+    filt_df = _read_sheet(xl, "Склады для подсортировки")
+
+    ff_avail = pd.Series(dtype="float64")
+    if not ff_df.empty:
+        cols = {c.lower(): c for c in ff_df.columns}
+        s_col = cols.get("артикул продавца")
+        w_col = cols.get("артикул wb") or cols.get("артикул вб") or cols.get("артикул wildberries")
+        q_col = cols.get("количество") or cols.get("остаток") or cols.get("кол-во") or cols.get("шт")
+        if s_col and w_col and q_col:
+            tmp = ff_df[[s_col, w_col, q_col]].copy()
+            tmp[q_col] = pd.to_numeric(tmp[q_col], errors="coerce").fillna(0)
+            ff_avail = tmp.groupby([s_col, w_col], dropna=False)[q_col].sum()
+
+    selected_wh: set[str] = set()
+    if not filt_df.empty:
+        cols = {c.lower(): c for c in filt_df.columns}
+        wh_col = cols.get("склад")
+        pick_col = cols.get("выбрать")
+        if wh_col and pick_col:
+            selected_wh = set(
+                filt_df.loc[pd.to_numeric(filt_df[pick_col], errors="coerce").fillna(0).astype(int) == 1, wh_col]
+                .astype(str)
+            )
+    if not selected_wh:
+        if "Склад" in result_df.columns:
+            selected_wh = set(result_df["Склад"].astype(str))
+
+    out = result_df.copy()
+    out["Рекомендация с учётом остатков FF"] = pd.to_numeric(out[base_col], errors="coerce").fillna(0).astype(float)
+
+    id_s = "Артикул продавца"
+    id_w = "Артикул WB"
+    wh_col = "Склад"
+    coef_col = "Коэф. склада"
+
+    if id_s in out.columns and id_w in out.columns and wh_col in out.columns:
+        for (seller, wb), grp in out.groupby([id_s, id_w], dropna=False):
+            idx_all = grp.index
+            idx_sel = grp.loc[grp[wh_col].astype(str).isin(selected_wh)].index
+            if len(idx_sel) == 0:
+                out.loc[idx_all, "Рекомендация с учётом остатков FF"] = \
+                    pd.to_numeric(out.loc[idx_all, base_col], errors="coerce").fillna(0).astype(int)
+                continue
+            theor = pd.to_numeric(out.loc[idx_sel, base_col], errors="coerce").fillna(0).clip(lower=0)
+            total_theor = float(theor.sum())
+            ff_total = float(ff_avail.get((seller, wb), float("nan")))
+            if math.isnan(ff_total):
+                out.loc[idx_sel, "Рекомендация с учётом остатков FF"] = theor.astype(int)
+                others = idx_all.difference(idx_sel)
+                if len(others):
+                    out.loc[others, "Рекомендация с учётом остатков FF"] = \
+                        pd.to_numeric(out.loc[others, base_col], errors="coerce").fillna(0).astype(int)
+                continue
+
+            if total_theor <= ff_total:
+                out.loc[idx_sel, "Рекомендация с учётом остатков FF"] = theor.astype(int)
+            else:
+                if coef_col in out.columns:
+                    coefs = pd.to_numeric(out.loc[idx_sel, coef_col], errors="coerce").fillna(0).clip(lower=0)
+                else:
+                    coefs = pd.Series([1.0] * len(idx_sel), index=idx_sel, dtype="float64")
+                sum_coef = float(coefs[coefs > 0].sum())
+                if sum_coef <= 0:
+                    denom = total_theor if total_theor > 0 else 1.0
+                    quotas = ff_total * (theor / denom)
+                else:
+                    quotas = ff_total * (coefs / sum_coef)
+                limited = pd.concat([theor, quotas], axis=1).min(axis=1)
+                out.loc[idx_sel, "Рекомендация с учётом остатков FF"] = limited.fillna(0).astype(int)
+
+                others = idx_all.difference(idx_sel)
+                if len(others):
+                    out.loc[others, "Рекомендация с учётом остатков FF"] = \
+                        pd.to_numeric(out.loc[others, base_col], errors="coerce").fillna(0).astype(int)
+    else:
+        out["Рекомендация с учётом остатков FF"] = out[base_col].fillna(0).astype(int)
+    return out
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
@@ -489,6 +608,25 @@ async def recommend(files: List[UploadFile] = File(...)):
                     "Рекомендация, шт",
                 ]
             )
+
+        # Добавляем столбец «Рекомендация с учётом остатков FF» с учётом книги.
+        raw_bytes = raw if isinstance(raw, (bytes, bytearray)) else b""
+        if results:
+            combined_frames: List[pd.DataFrame] = []
+            for sheet_name, df_wh in results.items():
+                tmp = df_wh.copy()
+                tmp["__sheet_name"] = sheet_name
+                combined_frames.append(tmp)
+            merged_df = pd.concat(combined_frames, ignore_index=True) if combined_frames else pd.DataFrame()
+            if not merged_df.empty or "Рекомендация, шт" in merged_df.columns:
+                merged_df = _apply_ff_quota(merged_df, raw_bytes)
+                if "__sheet_name" in merged_df.columns:
+                    for sheet_name in list(results.keys()):
+                        results[sheet_name] = merged_df[merged_df["__sheet_name"] == sheet_name] \
+                            .drop(columns=["__sheet_name"], errors="ignore")
+                else:
+                    for sheet_name in list(results.keys()):
+                        results[sheet_name] = merged_df.copy()
 
         out = BytesIO()
         try:
