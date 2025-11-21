@@ -213,44 +213,44 @@ def build_prototype_workbook(
         wh_grouped["Выбрать"] = 0
         wh_grouped["Частота подсортировок, дни"] = 28
 
-    # объединяем продажи и остатки
-    wh_merged = wh_grouped.merge(
-        stock_grouped,
-        on="Склад",
-        how="left"
-    ).fillna({"Остаток на сегодня": 0})
+        # объединяем продажи и остатки
+        wh_merged = wh_grouped.merge(
+            stock_grouped,
+            on="Склад",
+            how="left"
+        ).fillna({"Остаток на сегодня": 0})
 
-    # Средние продажи по складу (сумма средних продаж по SKU)
-    try:
-        avg_by_wh = (
-            sales_out.groupby("Склад", as_index=False)["Средние продажи в день"]
-            .sum()
-            .rename(columns={"Средние продажи в день": "Средние продажи в день"})
-        )
-        avg_by_wh["Средние продажи в день"] = avg_by_wh["Средние продажи в день"].astype(float).fillna(0)
-        wh_merged = wh_merged.merge(avg_by_wh, on="Склад", how="left")
-    except Exception:
-        wh_merged["Средние продажи в день"] = 0.0
+        # Средние продажи по складу (сумма средних продаж по SKU)
+        try:
+            avg_by_wh = (
+                sales_out.groupby("Склад", as_index=False)["Средние продажи в день"]
+                .sum()
+                .rename(columns={"Средние продажи в день": "Средние продажи в день"})
+            )
+            avg_by_wh["Средние продажи в день"] = avg_by_wh["Средние продажи в день"].astype(float).fillna(0)
+            wh_merged = wh_merged.merge(avg_by_wh, on="Склад", how="left")
+        except Exception:
+            wh_merged["Средние продажи в день"] = 0.0
 
-    wh_merged["Средние продажи в день"] = wh_merged["Средние продажи в день"].astype(float).fillna(0)
+        wh_merged["Средние продажи в день"] = wh_merged["Средние продажи в день"].astype(float).fillna(0)
 
-    # Запас, дней = Остаток / Средние продажи
-    wh_merged["Запас, дней"] = (
-        wh_merged["Остаток на сегодня"].astype(float)
-        / wh_merged["Средние продажи в день"].replace(0, float("nan"))
-    ).replace([float("inf"), float("-inf")], 0).fillna(0)
+        # Запас, дней = Остаток / Средние продажи
+        wh_merged["Запас, дней"] = (
+            wh_merged["Остаток на сегодня"].astype(float)
+            / wh_merged["Средние продажи в день"].replace(0, float("nan"))
+        ).replace([float("inf"), float("-inf")], 0).fillna(0)
 
-    wh_df = wh_merged[
-        [
-            "Склад",
-            "Выбрать",
-            "Частота подсортировок, дни",
-            "Продано за период, шт",
-            "Остаток на сегодня",
-            "Средние продажи в день",
-            "Запас, дней",
-        ]
-    ].sort_values("Продано за период, шт", ascending=False)
+        wh_df = wh_merged[
+            [
+                "Склад",
+                "Выбрать",
+                "Частота подсортировок, дни",
+                "Продано за период, шт",
+                "Остаток на сегодня",
+                "Средние продажи в день",
+                "Запас, дней",
+            ]
+        ].sort_values("Продано за период, шт", ascending=False)
     except Exception:
         wh_df = pd.DataFrame(columns=_WAREHOUSE_FILTER_COLUMNS)
     warehouse_filter_out = _ensure_columns(wh_df, _WAREHOUSE_FILTER_COLUMNS)
