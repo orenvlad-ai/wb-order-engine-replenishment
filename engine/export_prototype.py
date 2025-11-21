@@ -18,6 +18,7 @@ _WAREHOUSE_FILTER_COLUMNS = [
     "Выбрать",
     "Частота подсортировок, дни",
     "Продано за период, шт",
+    "Остаток на сегодня",
 ]
 _MOQ_SHEET = "MOQ"
 _MOQ_COLUMNS = ["Артикул продавца", "Артикул WB", "MOQ"]
@@ -190,16 +191,41 @@ def build_prototype_workbook(
     try:
         wh_base = sales_out[["Склад", "Заказали, шт"]].copy()
         wh_base["Заказали, шт"] = pd.to_numeric(wh_base["Заказали, шт"], errors="coerce").fillna(0)
+        # продажи по складам
         wh_grouped = (
             wh_base.dropna(subset=["Склад"])
             .groupby("Склад", as_index=False)["Заказали, шт"]
             .sum()
             .rename(columns={"Заказали, шт": "Продано за период, шт"})
         )
+
+        # остатки по складам
+        try:
+            stock_grouped = (
+                sales_out[["Склад", "Остаток на сегодня"]]
+                .groupby("Склад", as_index=False)["Остаток на сегодня"]
+                .sum()
+            )
+        except Exception:
+            stock_grouped = pd.DataFrame(columns=["Склад", "Остаток на сегодня"])
         wh_grouped["Выбрать"] = 0
         wh_grouped["Частота подсортировок, дни"] = 28
-        wh_df = wh_grouped[
-            ["Склад", "Выбрать", "Частота подсортировок, дни", "Продано за период, шт"]
+
+        # объединяем продажи и остатки
+        wh_merged = wh_grouped.merge(
+            stock_grouped,
+            on="Склад",
+            how="left"
+        ).fillna({"Остаток на сегодня": 0})
+
+        wh_df = wh_merged[
+            [
+                "Склад",
+                "Выбрать",
+                "Частота подсортировок, дни",
+                "Продано за период, шт",
+                "Остаток на сегодня",
+            ]
         ].sort_values("Продано за период, шт", ascending=False)
     except Exception:
         wh_df = pd.DataFrame(columns=_WAREHOUSE_FILTER_COLUMNS)
