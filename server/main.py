@@ -656,6 +656,7 @@ async def recommend(files: List[UploadFile] = File(...)):
                     results[sheet_key]["Рекомендация, шт"]
 
                 if "Артикул продавца" in results[sheet_key].columns and "Артикул WB" in results[sheet_key].columns:
+                    ff_stats = []
                     grouped = results[sheet_key].groupby(
                         ["Артикул продавца", "Артикул WB"],
                         dropna=False,
@@ -670,8 +671,13 @@ async def recommend(files: List[UploadFile] = File(...)):
                             ff_val = 0.0
 
                         order_theory_sum = int(group_df["Рекомендация, шт"].sum())
-                        logs.append(
-                            f"FF: SKU {sku_s}/{sku_w} — ФФ остаток={ff_val}, теоретический заказ={order_theory_sum}"
+                        ff_stats.append(
+                            {
+                                "seller": str(sku_s or "").strip(),
+                                "wb": str(sku_w or "").strip(),
+                                "ff": ff_val,
+                                "demand": order_theory_sum,
+                            }
                         )
 
                         if ff_val <= 0:
@@ -682,6 +688,36 @@ async def recommend(files: List[UploadFile] = File(...)):
                         df_sku = results[sheet_key].loc[idx]
                         ff_series = _distribute_ff_for_sku(df_sku, ff_val)
                         results[sheet_key].loc[idx, "Рекомендация с учётом ФФ"] = ff_series
+
+                    fully_covered = 0
+                    partially_covered = 0
+                    no_ff = 0
+                    deficit = []
+                    for s in ff_stats:
+                        demand = s["demand"]
+                        ff_val = s["ff"]
+                        if demand <= 0:
+                            continue
+                        if ff_val <= 0:
+                            no_ff += 1
+                        elif ff_val >= demand:
+                            fully_covered += 1
+                        else:
+                            partially_covered += 1
+                            coverage = ff_val / demand if demand > 0 else 0.0
+                            s["coverage"] = coverage
+                            deficit.append(s)
+
+                    logs.append(
+                        f"FF-итог: полностью покрыто {fully_covered} SKU, частично покрыто {partially_covered}, без покрытия {no_ff}"
+                    )
+
+                    deficit_sorted = sorted(deficit, key=lambda s: s.get("coverage", 0.0))
+                    top_deficit = deficit_sorted[:5]
+                    for s in top_deficit:
+                        logs.append(
+                            f"FF-дефицит: {s['seller']}/{s['wb']} — FF={s['ff']}, спрос={s['demand']}, покрытие={s.get('coverage', 0.0):.0%}"
+                        )
         if not results:
             results["Рекомендации"] = pd.DataFrame(
                 columns=[
