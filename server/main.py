@@ -750,6 +750,20 @@ async def recommend(files: List[UploadFile] = File(...)):
         if summary_rows:
             ff_summary = pd.concat(summary_rows, ignore_index=True)
 
+        # Таблица остатков ФФ по SKU для служебного листа «Остатки ФФ»
+        ff_table = pd.DataFrame(
+            [
+                {
+                    "Артикул продавца": k[0],
+                    "Артикул WB": k[1],
+                    "Количество": v,
+                }
+                for k, v in ff_stock.items()
+            ]
+        ) if ff_stock else pd.DataFrame(
+            columns=["Артикул продавца", "Артикул WB", "Количество"]
+        )
+
         out = BytesIO()
         try:
             writer = pd.ExcelWriter(out, engine="xlsxwriter")
@@ -792,8 +806,10 @@ async def recommend(files: List[UploadFile] = File(...)):
             # основные листы по складам / сценариям
             for wh_name, df_wh in results.items():
                 sheet_name = _clean(wh_name)
-                df_wh.to_excel(writer, sheet_name=sheet_name, index=False)
-                _autofit_sheet(writer, sheet_name, df_wh)
+                # колонка «Остаток ФФ» нужна для расчётов, но в итоговом Excel не показываем
+                df_to_write = df_wh.drop(columns=["Остаток ФФ"], errors="ignore")
+                df_to_write.to_excel(writer, sheet_name=sheet_name, index=False)
+                _autofit_sheet(writer, sheet_name, df_to_write)
 
             # служебная сводка по FF и рекомендациям
             if not ff_summary.empty:
@@ -806,7 +822,6 @@ async def recommend(files: List[UploadFile] = File(...)):
                     "Коэф. склада",
                     "Вес склада",
                     "Остаток на сегодня",
-                    "Остаток ФФ",
                     "Рекомендация, шт",
                     "Рекомендация с учётом ФФ",
                     "_Лист",
@@ -817,6 +832,12 @@ async def recommend(files: List[UploadFile] = File(...)):
                 summary_name = _clean("FF_Сводка")
                 ff_sheet.to_excel(writer, sheet_name=summary_name, index=False)
                 _autofit_sheet(writer, summary_name, ff_sheet)
+
+            # отдельный лист с остатками ФФ по SKU
+            if not ff_table.empty:
+                ff_raw_name = _clean("Остатки ФФ")
+                ff_table.to_excel(writer, sheet_name=ff_raw_name, index=False)
+                _autofit_sheet(writer, ff_raw_name, ff_table)
         out.seek(0)
         token = secrets.token_urlsafe(16)
         _memory_artifacts[token] = {
