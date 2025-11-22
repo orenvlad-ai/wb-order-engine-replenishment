@@ -788,6 +788,31 @@ async def recommend(files: List[UploadFile] = File(...)):
                 if ff_qty >= total_demand:
                     ff_table.at[idx, "Хватает на все"] = "Да"
 
+            # ---- Добавляем колонки по выбранным складам с теоретическими рекомендациями ----
+            if selected_wh:
+                for wh_name in selected_wh:
+                    col_name = str(wh_name)
+                    if col_name not in ff_table.columns:
+                        ff_table[col_name] = 0.0
+
+                for idx, row in ff_table.iterrows():
+                    seller = str(row["Артикул продавца"]).strip()
+                    wb = str(row["Артикул WB"]).strip()
+                    for wh_name, df_wh in results.items():
+                        if wh_name not in selected_wh:
+                            continue
+                        col_name = str(wh_name)
+                        try:
+                            mask = (
+                                (df_wh["Артикул продавца"].astype(str).str.strip() == seller)
+                                & (df_wh["Артикул WB"].astype(str).str.strip() == wb)
+                            )
+                            demand_sum = float(df_wh.loc[mask, "Рекомендация, шт"].sum() or 0.0)
+                            if demand_sum != 0.0:
+                                ff_table.at[idx, col_name] = demand_sum
+                        except Exception:
+                            continue
+
         out = BytesIO()
         try:
             writer = pd.ExcelWriter(out, engine="xlsxwriter")
