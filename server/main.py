@@ -769,7 +769,6 @@ async def recommend(files: List[UploadFile] = File(...)):
         if not ff_table.empty:
             ff_table["Хватает на все"] = "Нет"
             for idx, row in ff_table.iterrows():
-                seller = str(row["Артикул продавца"]).strip()
                 wb = str(row["Артикул WB"]).strip()
                 ff_qty = float(row["Количество"] or 0.0)
 
@@ -778,8 +777,7 @@ async def recommend(files: List[UploadFile] = File(...)):
                 for df_wh in results.values():
                     try:
                         mask = (
-                            (df_wh["Артикул продавца"].astype(str).str.strip() == seller)
-                            & (df_wh["Артикул WB"].astype(str).str.strip() == wb)
+                            df_wh["Артикул WB"].astype(str).str.strip() == wb
                         )
                         total_demand += float(df_wh.loc[mask, "Рекомендация, шт"].sum() or 0.0)
                     except Exception:
@@ -796,7 +794,6 @@ async def recommend(files: List[UploadFile] = File(...)):
                         ff_table[col_name] = 0.0
 
                 for idx, row in ff_table.iterrows():
-                    seller = str(row["Артикул продавца"]).strip()
                     wb = str(row["Артикул WB"]).strip()
                     for wh_name, df_wh in results.items():
                         if wh_name not in selected_wh:
@@ -804,8 +801,7 @@ async def recommend(files: List[UploadFile] = File(...)):
                         col_name = str(wh_name)
                         try:
                             mask = (
-                                (df_wh["Артикул продавца"].astype(str).str.strip() == seller)
-                                & (df_wh["Артикул WB"].astype(str).str.strip() == wb)
+                                df_wh["Артикул WB"].astype(str).str.strip() == wb
                             )
                             demand_sum = float(df_wh.loc[mask, "Рекомендация, шт"].sum() or 0.0)
                             if demand_sum != 0.0:
