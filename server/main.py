@@ -751,6 +751,7 @@ async def recommend(files: List[UploadFile] = File(...)):
             ff_summary = pd.concat(summary_rows, ignore_index=True)
 
         # Таблица остатков ФФ по SKU для служебного листа «Остатки ФФ»
+        # базовая таблица остатков ФФ
         ff_table = pd.DataFrame(
             [
                 {
@@ -763,6 +764,29 @@ async def recommend(files: List[UploadFile] = File(...)):
         ) if ff_stock else pd.DataFrame(
             columns=["Артикул продавца", "Артикул WB", "Количество"]
         )
+
+        # ---- Добавляем колонку "Хватает на все" ----
+        if not ff_table.empty:
+            ff_table["Хватает на все"] = "Нет"
+            for idx, row in ff_table.iterrows():
+                seller = str(row["Артикул продавца"]).strip()
+                wb = str(row["Артикул WB"]).strip()
+                ff_qty = float(row["Количество"] or 0.0)
+
+                # суммарная теоретическая рекомендация по выбранным складам
+                total_demand = 0.0
+                for df_wh in results.values():
+                    try:
+                        mask = (
+                            (df_wh["Артикул продавца"].astype(str).str.strip() == seller)
+                            & (df_wh["Артикул WB"].astype(str).str.strip() == wb)
+                        )
+                        total_demand += float(df_wh.loc[mask, "Рекомендация, шт"].sum() or 0.0)
+                    except Exception:
+                        pass
+
+                if ff_qty >= total_demand:
+                    ff_table.at[idx, "Хватает на все"] = "Да"
 
         out = BytesIO()
         try:
