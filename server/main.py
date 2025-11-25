@@ -754,31 +754,11 @@ async def recommend(files: List[UploadFile] = File(...)):
         if summary_rows:
             ff_summary = pd.concat(summary_rows, ignore_index=True)
 
-        # Подливаем в FF_Сводку общий Остаток ФФ по SKU (по Артикулу WB)
-        if not ff_summary.empty and not ff_table.empty:
-            try:
-                ff_summary["Артикул WB"] = ff_summary["Артикул WB"].astype(str).str.strip()
-                ff_table_wb = ff_table[["Артикул WB", "Остаток ФФ"]].copy()
-                ff_table_wb["Артикул WB"] = ff_table_wb["Артикул WB"].astype(str).str.strip()
-                ff_summary = ff_summary.merge(
-                    ff_table_wb,
-                    on="Артикул WB",
-                    how="left",
-                )
-            except Exception:
-                # если что-то пошло не так — просто не добавляем колонку
-                pass
-
         # Сортируем FF_Сводку по SKU (Артикул WB, затем Артикул продавца)
         if not ff_summary.empty:
             try:
                 ff_summary["Артикул WB"] = ff_summary["Артикул WB"].astype(str).str.strip()
                 ff_summary["Артикул продавца"] = ff_summary["Артикул продавца"].astype(str).str.strip()
-                # если в ff_table есть колонка "Хватает на все" — добавляем её и в сводку
-                if not ff_table.empty and "Хватает на все" in ff_table.columns:
-                    ff_table_wb = ff_table[["Артикул WB", "Хватает на все"]].copy()
-                    ff_table_wb["Артикул WB"] = ff_table_wb["Артикул WB"].astype(str).str.strip()
-                    ff_summary = ff_summary.merge(ff_table_wb, on="Артикул WB", how="left")
                 ff_summary = ff_summary.sort_values(
                     ["Артикул WB", "Артикул продавца"]
                 ).reset_index(drop=True)
@@ -857,6 +837,24 @@ async def recommend(files: List[UploadFile] = File(...)):
             ]).reset_index(drop=True)
         except Exception:
             pass
+
+        # После того как таблица ff_table дополнена остатками и колонкой "Хватает на все",
+        # подливаем обе колонки в FF_Сводку по Артикулу WB.
+        if not ff_summary.empty and not ff_table.empty:
+            try:
+                ff_summary["Артикул WB"] = ff_summary["Артикул WB"].astype(str).str.strip()
+                ff_table_join = ff_table.copy()
+                ff_table_join["Артикул WB"] = ff_table_join["Артикул WB"].astype(str).str.strip()
+                join_cols = ["Артикул WB"]
+                if "Остаток ФФ" in ff_table_join.columns:
+                    join_cols.append("Остаток ФФ")
+                if "Хватает на все" in ff_table_join.columns:
+                    join_cols.append("Хватает на все")
+                ff_table_join = ff_table_join[join_cols]
+                ff_summary = ff_summary.merge(ff_table_join, on="Артикул WB", how="left")
+            except Exception:
+                # если что-то пошло не так — не ломаем сборку, просто не добавляем данные FF
+                pass
 
         out = BytesIO()
         try:
