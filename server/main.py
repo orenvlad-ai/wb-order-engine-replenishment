@@ -765,10 +765,12 @@ async def recommend(files: List[UploadFile] = File(...)):
             columns=["Артикул продавца", "Артикул WB", "Количество"]
         )
 
+        # Явная колонка остатков ФФ для визуализации
+        if not ff_table.empty:
+            ff_table["Остаток ФФ"] = ff_table["Количество"]
+
         # ---- Добавляем колонку "Хватает на все" ----
         if not ff_table.empty:
-            # Явная колонка «Остаток ФФ» = общее количество по SKU (для визуализации)
-            ff_table["Остаток ФФ"] = ff_table["Количество"]
 
             ff_table["Хватает на все"] = "Нет"
             for idx, row in ff_table.iterrows():
@@ -812,13 +814,15 @@ async def recommend(files: List[UploadFile] = File(...)):
                         except Exception:
                             continue
 
-            # сортируем сводную таблицу по артикулу, чтобы SKU шли блоками
-            try:
-                ff_table["Артикул WB"] = ff_table["Артикул WB"].astype(str).str.strip()
-                ff_table["Артикул продавца"] = ff_table["Артикул продавца"].astype(str).str.strip()
-                ff_table = ff_table.sort_values(["Артикул WB", "Артикул продавца"]).reset_index(drop=True)
-            except Exception:
-                pass
+        # Финальная сортировка таблицы по SKU ПЕРЕД записью листа
+        try:
+            ff_table["Артикул WB"] = ff_table["Артикул WB"].astype(str).str.strip()
+            ff_table["Артикул продавца"] = ff_table["Артикул продавца"].astype(str).str.strip()
+            ff_table = ff_table.sort_values([
+                "Артикул WB", "Артикул продавца"
+            ]).reset_index(drop=True)
+        except Exception:
+            pass
 
         out = BytesIO()
         try:
