@@ -750,6 +750,32 @@ async def recommend(files: List[UploadFile] = File(...)):
         if summary_rows:
             ff_summary = pd.concat(summary_rows, ignore_index=True)
 
+        # Подливаем в FF_Сводку общий Остаток ФФ по SKU (по Артикулу WB)
+        if not ff_summary.empty and not ff_table.empty:
+            try:
+                ff_summary["Артикул WB"] = ff_summary["Артикул WB"].astype(str).str.strip()
+                ff_table_wb = ff_table[["Артикул WB", "Остаток ФФ"]].copy()
+                ff_table_wb["Артикул WB"] = ff_table_wb["Артикул WB"].astype(str).str.strip()
+                ff_summary = ff_summary.merge(
+                    ff_table_wb,
+                    on="Артикул WB",
+                    how="left",
+                )
+            except Exception:
+                # если что-то пошло не так — просто не добавляем колонку
+                pass
+
+        # Сортируем FF_Сводку по SKU (Артикул WB, затем Артикул продавца)
+        if not ff_summary.empty:
+            try:
+                ff_summary["Артикул WB"] = ff_summary["Артикул WB"].astype(str).str.strip()
+                ff_summary["Артикул продавца"] = ff_summary["Артикул продавца"].astype(str).str.strip()
+                ff_summary = ff_summary.sort_values(
+                    ["Артикул WB", "Артикул продавца"]
+                ).reset_index(drop=True)
+            except Exception:
+                pass
+
         # Таблица остатков ФФ по SKU для служебного листа «Остатки ФФ»
         # базовая таблица остатков ФФ
         ff_table = pd.DataFrame(
@@ -884,6 +910,7 @@ async def recommend(files: List[UploadFile] = File(...)):
                     "Остаток на сегодня",
                     "Рекомендация, шт",
                     "Рекомендация с учётом ФФ",
+                    "Остаток ФФ",
                     "_Лист",
                 ]:
                     if name in ff_summary.columns:
