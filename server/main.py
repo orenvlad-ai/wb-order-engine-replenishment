@@ -774,6 +774,11 @@ async def recommend(files: List[UploadFile] = File(...)):
             try:
                 ff_summary["Артикул WB"] = ff_summary["Артикул WB"].astype(str).str.strip()
                 ff_summary["Артикул продавца"] = ff_summary["Артикул продавца"].astype(str).str.strip()
+                # если в ff_table есть колонка "Хватает на все" — добавляем её и в сводку
+                if not ff_table.empty and "Хватает на все" in ff_table.columns:
+                    ff_table_wb = ff_table[["Артикул WB", "Хватает на все"]].copy()
+                    ff_table_wb["Артикул WB"] = ff_table_wb["Артикул WB"].astype(str).str.strip()
+                    ff_summary = ff_summary.merge(ff_table_wb, on="Артикул WB", how="left")
                 ff_summary = ff_summary.sort_values(
                     ["Артикул WB", "Артикул продавца"]
                 ).reset_index(drop=True)
@@ -913,6 +918,7 @@ async def recommend(files: List[UploadFile] = File(...)):
                     "Остаток на сегодня",
                     "Рекомендация, шт",
                     "Рекомендация с учётом ФФ",
+                    "Хватает на все",
                     "Остаток ФФ",
                     "_Лист",
                 ]:
@@ -922,6 +928,25 @@ async def recommend(files: List[UploadFile] = File(...)):
                 summary_name = _clean("FF_Сводка")
                 ff_sheet.to_excel(writer, sheet_name=summary_name, index=False)
                 _autofit_sheet(writer, summary_name, ff_sheet)
+                # условное форматирование по колонке "Хватает на все" (только для xlsxwriter)
+                try:
+                    ws = writer.sheets.get(summary_name)
+                    if ws is not None and hasattr(ws, "conditional_format") and "Хватает на все" in ff_sheet.columns:
+                        col_idx = list(ff_sheet.columns).index("Хватает на все")
+                        last_row = len(ff_sheet) + 1  # с учётом заголовка
+                        ws.conditional_format(
+                            1, col_idx, last_row, col_idx,
+                            {
+                                "type": "cell",
+                                "criteria": "==",
+                                "value": '"Нет"',
+                                "format": writer.book.add_format(
+                                    {"bg_color": "#FFF2CC"}  # светло-жёлтый
+                                ),
+                            },
+                        )
+                except Exception:
+                    pass
 
             # отдельный лист с остатками ФФ по SKU
             if not ff_table.empty:
