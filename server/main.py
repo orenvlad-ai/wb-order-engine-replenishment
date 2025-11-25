@@ -502,6 +502,10 @@ async def recommend(files: List[UploadFile] = File(...)):
 
         # --- Остатки Фулфилмент ---
         ff_stock: Dict[tuple[str, str], float] = {}
+        # Базовая инициализация таблицы остатков ФФ, чтобы избежать UnboundLocalError
+        ff_table = pd.DataFrame(
+            columns=["Артикул продавца", "Артикул WB", "Количество"]
+        )
 
         def _norm_id(v):
             if v is None:
@@ -777,7 +781,7 @@ async def recommend(files: List[UploadFile] = File(...)):
                 pass
 
         # Таблица остатков ФФ по SKU для служебного листа «Остатки ФФ»
-        # ff_table создаём ВСЕГДА здесь (вне try/except), чтобы избежать UnboundLocalError.
+        # Если ff_stock есть — обновляем ff_table фактическими остатками ФФ
         if ff_stock:
             ff_table = pd.DataFrame(
                 [
@@ -788,10 +792,6 @@ async def recommend(files: List[UploadFile] = File(...)):
                     }
                     for k, v in ff_stock.items()
                 ]
-            )
-        else:
-            ff_table = pd.DataFrame(
-                columns=["Артикул продавца", "Артикул WB", "Количество"]
             )
 
         # Явная колонка остатков ФФ для визуализации
