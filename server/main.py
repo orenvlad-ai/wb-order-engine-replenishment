@@ -765,6 +765,26 @@ async def recommend(files: List[UploadFile] = File(...)):
             except Exception:
                 pass
 
+        # Пересчитываем "Остаток ФФ" в сводке на основании текущего ff_table (по Артикулу WB)
+        if not ff_summary.empty and not ff_table.empty:
+            try:
+                # приводим ключи к строке
+                ff_summary["Артикул WB"] = ff_summary["Артикул WB"].astype(str).str.strip()
+                ff_table_norm = ff_table.copy()
+                ff_table_norm["Артикул WB"] = ff_table_norm["Артикул WB"].astype(str).str.strip()
+                # агрегируем остатки ФФ по WB
+                qty_by_wb = (
+                    ff_table_norm.groupby("Артикул WB")["Количество"]
+                    .sum()
+                )
+                # мапим в сводку; если нет данных — считаем 0
+                ff_summary["Остаток ФФ"] = (
+                    ff_summary["Артикул WB"].map(qty_by_wb).fillna(0)
+                )
+            except Exception:
+                # если что-то пошло не так — не роняем обработку
+                pass
+
         # Таблица остатков ФФ по SKU для служебного листа «Остатки ФФ»
         # Если ff_stock есть — обновляем ff_table фактическими остатками ФФ
         if ff_stock:
