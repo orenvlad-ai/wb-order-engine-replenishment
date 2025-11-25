@@ -777,19 +777,22 @@ async def recommend(files: List[UploadFile] = File(...)):
                 pass
 
         # Таблица остатков ФФ по SKU для служебного листа «Остатки ФФ»
-        # базовая таблица остатков ФФ
-        ff_table = pd.DataFrame(
-            [
-                {
-                    "Артикул продавца": k[0],
-                    "Артикул WB": k[1],
-                    "Количество": v,
-                }
-                for k, v in ff_stock.items()
-            ]
-        ) if ff_stock else pd.DataFrame(
-            columns=["Артикул продавца", "Артикул WB", "Количество"]
-        )
+        # ff_table создаём ВСЕГДА здесь (вне try/except), чтобы избежать UnboundLocalError.
+        if ff_stock:
+            ff_table = pd.DataFrame(
+                [
+                    {
+                        "Артикул продавца": k[0],
+                        "Артикул WB": k[1],
+                        "Количество": v,
+                    }
+                    for k, v in ff_stock.items()
+                ]
+            )
+        else:
+            ff_table = pd.DataFrame(
+                columns=["Артикул продавца", "Артикул WB", "Количество"]
+            )
 
         # Явная колонка остатков ФФ для визуализации
         if not ff_table.empty:
